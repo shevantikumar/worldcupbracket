@@ -467,6 +467,9 @@ label{display:block;font-size:.75rem;font-weight:600;color:var(--muted);margin-b
         </div>
       </div>
 
+      <div id="gs-view-banner" class="view-banner hidden">
+        👁 Viewing <strong id="gs-view-name"></strong>'s group picks — read only.
+      </div>
       <div id="gs-locked-notice" class="hidden" style="background:rgba(231,76,60,.1);border:1.5px solid #c0392b;border-radius:8px;padding:12px 16px;margin-bottom:14px;font-size:.82rem;color:#e88;">
         🔒 Group stage picks are locked — the tournament has started!
       </div>
@@ -753,6 +756,7 @@ let liveTeams    = {}; // {r32_0:['MEX','CAN'], ...} filled by API
 let predictions  = {};
 let currentUser  = null;  // logged-in user (owns their bracket)
 let viewingUser  = null;  // which bracket we're currently displaying (may differ)
+let viewingGroupUser = null;  // whose GROUP picks we're viewing (null = own)
 let myPicks      = {};
 let activeRound  = 'groups';
 
@@ -1958,7 +1962,7 @@ function renderDashboard(){
 
     return `<tr class="${rank===1?'leader':''}">
       <td><span class="rank-badge ${rc}">${rank}</span></td>
-      <td style="font-weight:600;">${escHtml(p.name)}</td>
+      <td style="font-weight:600;"><span onclick="viewGroupPicksOf('${escHtml(p.name)}')" style="cursor:pointer;text-decoration:underline;text-decoration-color:rgba(240,180,41,.4);text-underline-offset:3px;" title="View ${escHtml(p.name)}'s group picks">${escHtml(p.name)}</span></td>
       <td class="pts-num">${p.pts}</td>
       <td><div class="pts-bar-wrap"><div class="pts-bar-bg"><div class="pts-bar-fill" style="width:${pct}%"></div></div><span style="font-size:.7rem;color:var(--muted)">${p.pts}pt</span></div></td>
       <td title="${gsCellTitle}" style="color:#7de8a0;font-weight:600;">${p.gsPts}<span style="font-size:.65rem;color:var(--muted);font-weight:400;"> (${gsPicksDone}/12)</span></td>
@@ -2102,6 +2106,7 @@ let activePhaseScreen = null;
 
 function goHome() {
   activePhaseScreen = null;
+  viewingGroupUser = null;
   document.getElementById('home-landing').style.display = '';
   document.getElementById('home-phase1').classList.remove('active');
   document.getElementById('home-phase2').classList.remove('active');
@@ -2109,19 +2114,14 @@ function goHome() {
 }
 
 function openPhase1() {
-  if (isPhase1Locked() && currentUser) {
-    // Locked but user exists — show read-only picks directly
-    enterPhase1Picks(currentUser, true);
-    return;
-  }
+  // Always show the Phase 1 screen — locked just means read-only inside it
   activePhaseScreen = 'phase1';
   document.getElementById('home-landing').style.display = 'none';
   document.getElementById('home-phase2').classList.remove('active');
   document.getElementById('home-phase1').classList.add('active');
 
   if (currentUser) {
-    // Already know who this is — go straight to picks
-    enterPhase1Picks(currentUser, false);
+    enterPhase1Picks(currentUser, isPhase1Locked());
   } else {
     showP1NameEntry();
   }
@@ -2151,9 +2151,14 @@ function showP1NameEntry() {
 function startPhase1Picks() {
   const raw = document.getElementById('p1-name-input').value.trim();
   if (!raw) { toast('Enter your name first!'); return; }
-  const existing = Object.keys(predictions).find(n => n.toLowerCase() === raw.toLowerCase());
+  const existing = Object.keys({...predictions, ...groupPicks}).find(n => n.toLowerCase() === raw.toLowerCase());
   if (existing) {
-    enterPhase1Picks(existing, false); return;
+    enterPhase1Picks(existing, isPhase1Locked()); return;
+  }
+  // New user after the deadline — entries are closed
+  if (isPhase1Locked()) {
+    toast('⏰ Group stage picks are closed — new entries can\'t be added');
+    return;
   }
   // New user — Venmo gate
   hide('p1-name-entry');
@@ -2174,6 +2179,7 @@ function confirmVenmoPhase1() {
 }
 
 function enterPhase1Picks(name, readOnly) {
+  viewingGroupUser = null; // viewing own picks
   currentUser = name;
   try { localStorage.setItem('wc26_session', name); } catch(e){}
   hide('p1-name-entry'); hide('p1-venmo');
@@ -2181,6 +2187,26 @@ function enterPhase1Picks(name, readOnly) {
   document.getElementById('p1-active-name').textContent = name;
   const locked = isPhase1Locked() || readOnly;
   document.getElementById('p1-save-btn').style.display = locked ? 'none' : '';
+  renderGroupStage();
+}
+
+// View someone else's group picks read-only (from dashboard or home list).
+// Does NOT change currentUser or the session — purely a viewer.
+function viewGroupPicksOf(name) {
+  viewingGroupUser = name;
+  activePhaseScreen = 'phase1';
+  // Show home tab + phase1 screen
+  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('tab-home').classList.add('active');
+  document.querySelectorAll('.tab-btn').forEach(b=>{if(b.getAttribute('onclick')?.includes('home'))b.classList.add('active');});
+  document.getElementById('home-landing').style.display = 'none';
+  document.getElementById('home-phase2').classList.remove('active');
+  document.getElementById('home-phase1').classList.add('active');
+  hide('p1-name-entry'); hide('p1-venmo');
+  show('p1-picks-ui');
+  document.getElementById('p1-active-name').textContent = name + "'s picks";
+  document.getElementById('p1-save-btn').style.display = 'none';
   renderGroupStage();
 }
 
@@ -2258,9 +2284,9 @@ function renderHomeLandingParticipants() {
   el.innerHTML = names.map(n => {
     const gp = groupPicks[n] ? Object.keys(groupPicks[n]).length : 0;
     const kp = predictions[n]?.submitted ? '✅' : (predictions[n]?.r32?.some(Boolean) ? '🔄' : '—');
-    return `<div class="participant-item" onclick="quickLoadUser('${escHtml(n)}')">
+    return `<div class="participant-item" onclick="viewGroupPicksOf('${escHtml(n)}')" title="View ${escHtml(n)}'s group picks">
       <div><div class="p-name">${escHtml(n)}</div>
-      <div class="p-status">Groups: ${gp}/12 · Bracket: ${kp}</div></div>
+      <div class="p-status">Groups: ${gp}/12 · Bracket: ${kp} · 👁 Tap to view picks</div></div>
       <div style="font-size:.85rem">${calcScore(n) + calcGroupScore(n)}pts</div>
     </div>`;
   }).join('');
@@ -2526,35 +2552,44 @@ function isPhase2Open()   { return Date.now() >= PHASE2_OPEN; }
 
 /* ── Render Group Stage tab ─────────────────────────────────────── */
 function renderGroupStage() {
-  const locked = isPhase1Locked();
-  const noUser = !currentUser;
+  const displayUser = viewingGroupUser || currentUser;
+  const isOther = !!(viewingGroupUser && viewingGroupUser !== currentUser);
+  const locked = isPhase1Locked() || isOther;
+  const noUser = !displayUser;
 
   // Name gate and submit row live in phase1 screen now
   const gnGate = document.getElementById('gs-name-gate');
   if (gnGate) gnGate.classList.toggle('hidden', !noUser);
   const lkNotice = document.getElementById('gs-locked-notice');
-  if (lkNotice) lkNotice.classList.toggle('hidden', !locked);
+  if (lkNotice) lkNotice.classList.toggle('hidden', !isPhase1Locked() || isOther);
   const instrEl = document.getElementById('gs-instructions');
   if (instrEl) instrEl.classList.toggle('hidden', locked);
   const gsTimer = document.getElementById('gs-timer-bar');
-  if (gsTimer) gsTimer.classList.toggle('hidden', locked);
+  if (gsTimer) gsTimer.classList.toggle('hidden', isPhase1Locked());
   const p1SaveBtn = document.getElementById('p1-save-btn');
   if (p1SaveBtn) p1SaveBtn.style.display = locked ? 'none' : '';
+
+  // Viewing-other banner
+  const vb = document.getElementById('gs-view-banner');
+  if (vb) {
+    vb.classList.toggle('hidden', !isOther);
+    if (isOther) document.getElementById('gs-view-name').textContent = displayUser;
+  }
 
   const grid = document.getElementById('groups-grid');
   grid.innerHTML = '';
 
   if (noUser) return;
 
-  // Phase 2 unlock notice
-  if (isPhase2Open()) {
+  // Phase 2 unlock notice (only on own picks)
+  if (isPhase2Open() && !isOther) {
     const p2 = document.createElement('div');
     p2.className = 'gs-phase2-notice';
     p2.innerHTML = `<h3>🚀 Phase 2 is now open!</h3><p>Group stage is over. Head to <strong>My Bracket</strong> to submit your Round of 32 knockout picks. Deadline: <strong>Jun 28, 9:00 AM PT</strong></p>`;
     grid.appendChild(p2);
   }
 
-  const userPicks = groupPicks[currentUser] || {};
+  const userPicks = groupPicks[displayUser] || {};
   const container = document.createElement('div');
   container.className = 'gs-groups-grid';
 
