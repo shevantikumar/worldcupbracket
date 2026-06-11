@@ -620,7 +620,7 @@ label{display:block;font-size:.75rem;font-weight:600;color:var(--muted);margin-b
         <thead><tr>
           <th>#</th><th>Player</th><th>Total</th><th style="min-width:110px;">Progress</th>
           <th>Groups</th><th>R32</th><th>R16</th><th>QF</th><th>SF</th><th>3rd</th><th>Fin</th>
-          <th>Champion Pick</th><th>Still Alive?</th>
+          <th>Champion Pick</th><th>Still Alive?</th><th>Bracket</th>
         </tr></thead>
         <tbody id="leaderboard-body"></tbody>
       </table>
@@ -1848,10 +1848,13 @@ function calcBreakdown(name){
   };
 }
 function isAlive(name){
-  const pred=predictions[name];if(!pred||!pred.final)return false;
-  if(liveResults.final)return pred.final===liveResults.final;
-  if(liveResults.sf_0&&liveResults.sf_1)return pred.final===liveResults.sf_0||pred.final===liveResults.sf_1;
-  return true;
+  const pred=predictions[name];
+  // If the Final has been played, check against actual winner
+  if(liveResults.final) return !!(pred?.final && pred.final===liveResults.final);
+  // If SF winners known, check if their pick is still in
+  if(liveResults.sf_0&&liveResults.sf_1) return !!(pred?.final && (pred.final===liveResults.sf_0||pred.final===liveResults.sf_1));
+  // Tournament hasn't reached that stage yet — no one is "out"
+  return null; // null = tournament not started, show "—" not ✗ Out
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -1875,13 +1878,21 @@ function renderDashboard(){
   noMsg.classList.add('hidden');
 
   const ranked = allNames.map(n => {
-    const ksPts = calcScore(n);           // knockout bracket points
-    const gsPts = calcGroupScore(n);      // group stage points
+    const ksPts = calcScore(n);
+    const gsPts = calcGroupScore(n);
     const total  = ksPts + gsPts;
     return { name:n, pts:total, gsPts, ksPts, bd:calcBreakdown(n), alive:isAlive(n) };
   }).sort((a,b)=>b.pts-a.pts);
 
   const max = ranked[0]?.pts || 1;
+  // Can this user view others? They need to have their own group picks or bracket
+  const myName = currentUser;
+  const canViewOthers = myName && (
+    (groupPicks[myName] && Object.keys(groupPicks[myName]).length > 0) ||
+    predictions[myName]?.submitted ||
+    predictions[myName]?.r32?.some(Boolean)
+  );
+
   tbody.innerHTML = ranked.map((p,i) => {
     const rank=i+1, rc=rank===1?'rank-1':rank===2?'rank-2':rank===3?'rank-3':'rank-n';
     const champ = predictions[p.name]?.final;
@@ -1889,6 +1900,24 @@ function renderDashboard(){
     const pct = max ? Math.round(p.pts/max*100) : 0;
     const gsPicksDone = groupPicks[p.name] ? Object.keys(groupPicks[p.name]).length : 0;
     const gsCellTitle = `${p.gsPts}pts (${gsPicksDone}/12 groups picked)`;
+    const alive = p.alive;
+    const aliveBadge = alive === null
+      ? '<span class="alive-badge" style="background:rgba(255,255,255,.06);border:1px solid var(--border);color:var(--muted);">— Pending</span>'
+      : alive
+        ? '<span class="alive-badge alive">✓ Alive</span>'
+        : '<span class="alive-badge dead">✗ Out</span>';
+
+    // View bracket button — only shown if user has a submitted knockout bracket
+    const hasKnockout = predictions[p.name]?.submitted || predictions[p.name]?.r32?.some(Boolean);
+    const isMe = p.name === myName;
+    const viewCell = hasKnockout && isPhase2Open()
+      ? (isMe
+          ? `<button class="btn btn-outline btn-sm" style="font-size:.65rem;padding:3px 8px;" onclick="openPhase2();showTab('home')">My Bracket</button>`
+          : (canViewOthers
+              ? `<button class="btn btn-outline btn-sm" style="font-size:.65rem;padding:3px 8px;" onclick="viewFromDashboard('${escHtml(p.name)}')">View</button>`
+              : '—'))
+      : '—';
+
     return `<tr class="${rank===1?'leader':''}">
       <td><span class="rank-badge ${rc}">${rank}</span></td>
       <td style="font-weight:600;">${escHtml(p.name)}</td>
@@ -1897,15 +1926,33 @@ function renderDashboard(){
       <td title="${gsCellTitle}" style="color:#7de8a0;font-weight:600;">${p.gsPts}<span style="font-size:.65rem;color:var(--muted);font-weight:400;"> (${gsPicksDone}/12)</span></td>
       <td>${p.bd.r32}</td><td>${p.bd.r16}</td><td>${p.bd.qf}</td><td>${p.bd.sf}</td><td>${p.bd.tp}</td><td>${p.bd.fin}</td>
       <td style="font-size:.8rem;">${cd}</td>
-      <td><span class="alive-badge ${p.alive?'alive':'dead'}">${p.alive?'✓ Alive':'✗ Out'}</span></td>
+      <td>${aliveBadge}</td>
+      <td>${viewCell}</td>
     </tr>`;
   }).join('');
 }
+
 function renderDashboardIfVisible(){if(document.getElementById('tab-dashboard').classList.contains('active'))renderDashboard();}
 
-/* ══════════════════════════════════════════════════════════════════
-   UTILS
-══════════════════════════════════════════════════════════════════ */
+// View another user's bracket from the dashboard
+function viewFromDashboard(name) {
+  if (!currentUser) { toast('Enter your name on the Home tab first'); return; }
+  viewingUser = name;
+  activePhaseScreen = 'phase2';
+  document.getElementById('home-landing').style.display = 'none';
+  document.getElementById('home-phase1').classList.remove('active');
+  document.getElementById('home-phase2').classList.add('active');
+  hide('p2-name-entry'); hide('p2-venmo');
+  show('p2-bracket-ui');
+  document.getElementById('p2-active-name').textContent = name + "'s bracket";
+  updateBracketScreenHeader();
+  renderMyBracket();
+  // Switch to Home tab to show the bracket
+  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('tab-home').classList.add('active');
+  document.querySelectorAll('.tab-btn').forEach(b=>{if(b.getAttribute('onclick')?.includes('home'))b.classList.add('active');});
+}
 function toast(msg,dur=2600){const el=document.getElementById('toast');el.textContent=msg;el.classList.add('show');setTimeout(()=>el.classList.remove('show'),dur);}
 function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 
