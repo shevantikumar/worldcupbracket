@@ -600,6 +600,11 @@ label{display:block;font-size:.75rem;font-weight:600;color:var(--muted);margin-b
         <p style="font-size:.72rem;color:var(--muted);margin-bottom:10px;">Enter confirmed final standings for each group after matches finish June 24-27.</p>
         <div class="admin-grid" id="admin-gs-grid"></div>
       </div>
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
+        <div style="font-size:.75rem;color:var(--gold);font-weight:700;letter-spacing:.07em;text-transform:uppercase;margin-bottom:10px;">Group Match Results (manual fallback)</div>
+        <p style="font-size:.72rem;color:var(--muted);margin-bottom:10px;">Only needed if the ESPN feed misses a match. Set the winner or draw per match.</p>
+        <div class="admin-grid" id="admin-gm-grid"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -1041,11 +1046,11 @@ function renderGroupStageMatches() {
 
   content.innerHTML = '<div class="live-round-title" style="color:var(--mid);margin-bottom:14px;">⚽ Group Stage · Jun 11–27</div>';
 
-  // Update pill badge with completed match count
+  // Update pill badge with completed match count (gm_* keys in liveResults)
   const totalMatches = Object.values(GROUP_MATCHES).reduce((a,g)=>a+g.length,0);
-  const completedMatches = Object.values(liveGroupStandings).reduce((a,s)=>a+(s?s.filter(Boolean).length>0?s.length:0:0),0);
+  const completedMatches = Object.keys(liveResults).filter(k=>k.startsWith('gm_')&&liveResults[k]).length;
   const pillEl = document.getElementById('pill-done-groups');
-  if (pillEl) { pillEl.textContent = completedMatches > 0 ? `${Object.keys(liveGroupStandings).length}/12` : ''; pillEl.style.display = completedMatches>0?'':'none'; }
+  if (pillEl) { pillEl.textContent = completedMatches > 0 ? `${completedMatches}/${totalMatches}` : ''; pillEl.style.display = completedMatches>0?'':'none'; }
 
   // Show each group's matches
   Object.keys(GROUP_MATCHES).sort().forEach(grp => {
@@ -1077,38 +1082,34 @@ function renderGroupStageMatches() {
       const home = TEAMS[match.home] || {name: match.home, flag:'🏳'};
       const away = TEAMS[match.away] || {name: match.away, flag:'🏳'};
 
-      // Determine winner from standings (finished if both teams appear in standings)
-      let homeWon = false, awayWon = false;
-      if (standings && standings.filter(Boolean).length >= 2) {
-        // Simple heuristic: whoever ranked higher is "doing better"
-        // Real match results would come from API — for now show standings context
-        const homeRank = standings.indexOf(match.home);
-        const awayRank = standings.indexOf(match.away);
-        // We can't determine individual match winners from final standings alone
-        // unless admin also enters match scores — leave neutral unless liveResults has it
-      }
-
-      // Check if we have a specific group match result stored
+      // Result from API or admin: team code, 'DRAW', or null (not played)
       const matchKey = `gm_${match.m}`; // e.g. gm_A1
-      const winner = liveResults[matchKey] || null;
+      const result = liveResults[matchKey] || null;
+      const isDraw = result === 'DRAW';
+      const score  = liveResults[`gmscore_${match.m}`] || null; // "2-1" oriented home-away
+      const [hScore, aScore] = score ? score.split('-') : [null, null];
 
       const card = document.createElement('div');
-      card.className = 'gs-match-card' + (winner ? ' finished' : '');
+      card.className = 'gs-match-card' + (result ? ' finished' : '');
 
       const meta = document.createElement('div');
       meta.className = 'gs-match-meta';
-      meta.innerHTML = `<span class="gsm-grp">Group ${grp} · ${match.m}</span><span class="gsm-time">${match.date} · ${match.time}</span><span class="gsm-venue">${match.venue}</span>`;
+      const statusTag = result ? (isDraw ? ' · FT — Draw' : ' · FT') : '';
+      meta.innerHTML = `<span class="gsm-grp">Group ${grp} · ${match.m}${statusTag}</span><span class="gsm-time">${match.date} · ${match.time}</span><span class="gsm-venue">${match.venue}</span>`;
       card.appendChild(meta);
 
       [
-        {team: home, code: match.home, side: 'home'},
-        {team: away, code: match.away, side: 'away'}
-      ].forEach(({team, code}) => {
+        {team: home, code: match.home, goals: hScore},
+        {team: away, code: match.away, goals: aScore}
+      ].forEach(({team, code, goals}) => {
         const row = document.createElement('div');
-        const isWinner = winner === code;
-        const isLoser  = winner && winner !== code;
+        const isWinner = result && !isDraw && result === code;
+        const isLoser  = result && !isDraw && result !== code;
         row.className = 'gs-team-row' + (isWinner ? ' gs-winner' : '') + (isLoser ? ' gs-loser' : '');
-        row.innerHTML = `<span class="gst-flag">${team.flag}</span><span class="gst-name">${team.name}</span>${isWinner ? '<span class="gst-score">✓</span>' : ''}`;
+        const scoreHtml = goals !== null && goals !== undefined && goals !== ''
+          ? `<span class="gst-score">${goals}</span>`
+          : (isWinner ? '<span class="gst-score">✓</span>' : '');
+        row.innerHTML = `<span class="gst-flag">${team.flag}</span><span class="gst-name">${team.name}</span>${scoreHtml}`;
         card.appendChild(row);
       });
 
@@ -1722,19 +1723,24 @@ function resetMyBracket(){
 ══════════════════════════════════════════════════════════════════ */
 const ESPN_MAP = {
   'netherlands':'NED','holland':'NED','ned':'NED','usa':'USA','united states':'USA',
-  'argentina':'ARG','australia':'AUS','france':'FRA','poland':'POL','england':'ENG',
+  'argentina':'ARG','australia':'AUS','france':'FRA','england':'ENG',
   'senegal':'SEN','japan':'JPN','croatia':'CRO','hrv':'CRO','brazil':'BRA',
   'korea republic':'KOR','south korea':'KOR','kor':'KOR','morocco':'MAR','spain':'ESP',
   'portugal':'POR','switzerland':'SUI','qatar':'QAT','ecuador':'ECU','iran':'IRN',
-  'ir iran':'IRN','wales':'WAL','saudi arabia':'KSA','mexico':'MEX','denmark':'DEN',
-  'canada':'CAN','serbia':'SRB','cameroon':'CMR','uruguay':'URU','ghana':'GHA',
-  'colombia':'COL','germany':'GER','belgium':'BEL','ukraine':'UKR','scotland':'SCO',
+  'ir iran':'IRN','saudi arabia':'KSA','mexico':'MEX',
+  'canada':'CAN','uruguay':'URU','ghana':'GHA',
+  'colombia':'COL','germany':'GER','belgium':'BEL','scotland':'SCO',
   'norway':'NOR','czechia':'CZE','czech republic':'CZE','south africa':'RSA',
-  'nigeria':'NGR',"côte d'ivoire":'CIV','ivory coast':'CIV','bolivia':'BOL',
-  'venezuela':'VEN','panama':'PAN','iraq':'IRQ','jordan':'JOR','austria':'AUT',
-  'slovenia':'SLO','greece':'GRE','ireland':'IRL','turkey':'TUR','türkiye':'TUR',
+  "côte d'ivoire":'CIV','ivory coast':'CIV','cote d\'ivoire':'CIV',
+  'panama':'PAN','iraq':'IRQ','jordan':'JOR','austria':'AUT',
+  'turkey':'TUR','türkiye':'TUR','turkiye':'TUR',
   'paraguay':'PAR','cabo verde':'CPV','cape verde':'CPV','algeria':'ALG','haiti':'HAI',
-  'new zealand':'NZL','uzbekistan':'UZB','congo dr':'CGO','congo':'CGO',
+  'new zealand':'NZL','uzbekistan':'UZB',
+  // 2026 teams previously missing from this map:
+  'bosnia and herzegovina':'BIH','bosnia & herzegovina':'BIH','bosnia':'BIH','bosnia-herzegovina':'BIH',
+  'sweden':'SWE','egypt':'EGY','tunisia':'TUN',
+  'curaçao':'CUW','curacao':'CUW',
+  'dr congo':'COD','congo dr':'COD','democratic republic of the congo':'COD','congo':'COD',
 };
 function espnCode(t){if(!t)return null;const k=(t.displayName||t.abbreviation||t.name||'').toLowerCase().trim();return ESPN_MAP[k]||ESPN_MAP[(t.abbreviation||'').toLowerCase()]||null;}
 
@@ -1745,7 +1751,11 @@ async function fetchLiveResults(){
 }
 async function tryESPN(){
   try{
-    const urls=['https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard','https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=20260628-20260719'];
+    const urls=[
+      'https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard',
+      'https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=20260611-20260627', // group stage
+      'https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=20260628-20260719', // knockouts
+    ];
     let events=[];
     for(const url of urls){try{const r=await fetch(url,{cache:'no-store'});if(r.ok){const d=await r.json();events=events.concat(d.events||[]);}}catch(e){}}
     if(!events.length)return false;
@@ -1754,10 +1764,28 @@ async function tryESPN(){
     events.forEach(ev=>{
       const comp=ev.competitions?.[0];if(!comp)return;
       if(!comp.status?.type?.completed)return;
-      const winner=comp.competitors?.find(c=>c.winner);if(!winner)return;
-      const wc=espnCode(winner.team);if(!wc)return;
       const comps=comp.competitors||[];
-      const codes=comps.map(c=>espnCode(c.team)).filter(Boolean);
+      const codes=comps.map(c=>espnCode(c.team));
+      if(codes.some(c=>!c)||codes.length<2)return;
+
+      // ── 1. GROUP STAGE match? (draws allowed) ──
+      const gm = identifyGroupMatch(codes[0], codes[1]);
+      if (gm) {
+        const winnerComp = comps.find(c=>c.winner);
+        const result = winnerComp ? espnCode(winnerComp.team) : 'DRAW';
+        // Build score string oriented to OUR home/away order in GROUP_MATCHES
+        const byCode = {};
+        comps.forEach(c=>{ const cd=espnCode(c.team); if(cd) byCode[cd]=c.score??''; });
+        const score = `${byCode[gm.match.home]??''}-${byCode[gm.match.away]??''}`;
+        const wKey=`gm_${gm.match.m}`, sKey=`gmscore_${gm.match.m}`;
+        if(liveResults[wKey]!==result){liveResults[wKey]=result;updated=true;}
+        if(score!=='-' && liveResults[sKey]!==score){liveResults[sKey]=score;updated=true;}
+        return;
+      }
+
+      // ── 2. KNOCKOUT match? (winner required) ──
+      const winner=comps.find(c=>c.winner);if(!winner)return;
+      const wc=espnCode(winner.team);if(!wc)return;
       const slot=identifySlot(codes);if(!slot)return;
       const key=slot.round==='tp'||slot.round==='final'?slot.round:`${slot.round}_${slot.idx}`;
       if(liveResults[key]!==wc){liveResults[key]=wc;updated=true;}
@@ -1768,6 +1796,20 @@ async function tryESPN(){
     setApiStatus('ok',`ESPN · ${done} completed · ${new Date().toLocaleTimeString()}`);
     return true;
   }catch(e){return false;}
+}
+
+// Match two team codes against the 72 group stage fixtures.
+// Each pair plays only once in groups, so the pair uniquely identifies the match.
+function identifyGroupMatch(ta, tb){
+  if(!ta||!tb)return null;
+  for(const grp of Object.keys(GROUP_MATCHES)){
+    for(const match of GROUP_MATCHES[grp]){
+      if((match.home===ta&&match.away===tb)||(match.home===tb&&match.away===ta)){
+        return {grp, match};
+      }
+    }
+  }
+  return null;
 }
 function identifySlot(codes){
   if(!codes||codes.length<2)return null;
@@ -1851,6 +1893,8 @@ function renderAdminPanel(){
       grid.appendChild(div);
     }
   });
+  // Also render the group standings + group match result admin grids
+  renderGroupStandingsAdmin();
 }
 function adminSet(key,code){
   if(code)liveResults[key]=code;else delete liveResults[key];
@@ -2738,6 +2782,38 @@ function renderGroupStandingsAdmin() {
       div.appendChild(sel);
     });
     el.appendChild(div);
+  });
+  renderGroupMatchesAdmin();
+}
+
+/* Group match results admin — manual fallback when ESPN misses a match */
+function renderGroupMatchesAdmin() {
+  const el = document.getElementById('admin-gm-grid');
+  if (!el) return;
+  el.innerHTML = '';
+  Object.keys(GROUP_MATCHES).sort().forEach(grp => {
+    GROUP_MATCHES[grp].forEach(match => {
+      const hT = TEAMS[match.home]||{name:match.home,flag:'🏳'};
+      const aT = TEAMS[match.away]||{name:match.away,flag:'🏳'};
+      const wKey = `gm_${match.m}`;
+      const cur = liveResults[wKey] || '';
+      const div = document.createElement('div');
+      div.className = 'admin-match-row';
+      div.innerHTML = `<span class="round-tag tag-r32">${match.m}</span><span style="font-size:.6rem;color:var(--muted);margin-left:4px;">${match.date} ${match.time}</span><label style="margin-top:5px;">${hT.name} vs ${aT.name}</label>`;
+      const sel = document.createElement('select');
+      sel.innerHTML = `<option value="">— Not played —</option>
+        <option value="${match.home}" ${cur===match.home?'selected':''}>${hT.flag} ${hT.name} won</option>
+        <option value="DRAW" ${cur==='DRAW'?'selected':''}>🤝 Draw</option>
+        <option value="${match.away}" ${cur===match.away?'selected':''}>${aT.flag} ${aT.name} won</option>`;
+      sel.addEventListener('change', () => {
+        if (sel.value) liveResults[wKey] = sel.value; else delete liveResults[wKey];
+        saveResults();
+        if (document.getElementById('tab-live-bracket').classList.contains('active')) renderLiveBracket();
+        toast('✅ Result saved');
+      });
+      div.appendChild(sel);
+      el.appendChild(div);
+    });
   });
 }
 
