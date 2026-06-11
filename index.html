@@ -809,13 +809,38 @@ function scheduleSync() {
 async function syncToJSONBin() {
   if (_saving) { _pendingSave = true; return; }
   _saving = true;
-  // Mirror to localStorage as backup
-  try { localStorage.setItem('wc26_preds',  JSON.stringify(predictions)); } catch(e){}
-  try { localStorage.setItem('wc26_gpicks', JSON.stringify(groupPicks)); } catch(e){}
-  try { localStorage.setItem('wc26_live',   JSON.stringify(liveResults)); } catch(e){}
-  try { localStorage.setItem('wc26_teams',  JSON.stringify(liveTeams)); } catch(e){}
-  try { localStorage.setItem('wc26_gstand', JSON.stringify(liveGroupStandings)); } catch(e){}
   try {
+    // MERGE-BEFORE-WRITE: pull the latest server state first so we never
+    // overwrite picks another friend just submitted from their device.
+    try {
+      const latest = await fetch(JB_URL + '/latest', {
+        headers: { 'X-Master-Key': JB_KEY, 'X-Bin-Meta': 'false' }
+      });
+      if (latest.ok) {
+        const remote = await latest.json();
+        // Keep every remote entry; our own user's local entries win for ourselves.
+        const mergedPreds  = { ...(remote.predictions||{}), };
+        const mergedGroups = { ...(remote.groupPicks ||{}), };
+        if (currentUser) {
+          if (predictions[currentUser]) mergedPreds[currentUser]  = predictions[currentUser];
+          if (groupPicks[currentUser])  mergedGroups[currentUser] = groupPicks[currentUser];
+        }
+        predictions = mergedPreds;
+        groupPicks  = mergedGroups;
+        // Admin-entered data: local wins per-key (only the admin edits these)
+        liveResults        = { ...(remote.liveResults||{}),        ...liveResults };
+        liveTeams          = { ...(remote.liveTeams||{}),          ...liveTeams };
+        liveGroupStandings = { ...(remote.liveGroupStandings||{}), ...liveGroupStandings };
+      }
+    } catch(e) { /* merge fetch failed — proceed with local state */ }
+
+    // Mirror to localStorage as backup
+    try { localStorage.setItem('wc26_preds',  JSON.stringify(predictions)); } catch(e){}
+    try { localStorage.setItem('wc26_gpicks', JSON.stringify(groupPicks)); } catch(e){}
+    try { localStorage.setItem('wc26_live',   JSON.stringify(liveResults)); } catch(e){}
+    try { localStorage.setItem('wc26_teams',  JSON.stringify(liveTeams)); } catch(e){}
+    try { localStorage.setItem('wc26_gstand', JSON.stringify(liveGroupStandings)); } catch(e){}
+
     const res = await fetch(JB_URL, {
       method: 'PUT',
       headers: {
@@ -1177,11 +1202,13 @@ function _renderLiveBracketTree(lb, highlightRound) {
     meta.innerHTML=`<span class="m-label">${lbl}</span><span class="m-time">${sched.date||''} ${sched.time||''}</span><span class="m-venue">${sched.venue||''}</span>`;
     card.appendChild(meta);
     [t1,t2].forEach(t=>{
-      const isW=winner&&t.code&&winner===t.code,isL=winner&&t.code&&winner!==t.code;
       const row=document.createElement('div');
-      if(!t.code&&!t.fromLabel){row.className='match-team tbd';row.innerHTML='<span class="flag">—</span><span class="name">TBD</span>';}
-      else if(!t.code&&t.fromLabel){row.className='match-team tbd';row.innerHTML=`<span class="flag">🏳</span><span class="name" style="font-size:.6rem;">${t.fromLabel}</span>`;}
-      else{row.className='match-team'+(isW?' winner':'')+(isL?' loser':'');row.innerHTML=`<span class="flag">${t.flag}</span><span class="name">${t.name}</span>`;}
+      // Placeholder slot (R32 before qualifiers confirmed): groupTeams present means
+      // t.code is just a representative for the picker — NOT a decided team. Show the label.
+      const isPlaceholder = !!t.groupTeams;
+      if(isPlaceholder||( !t.code&&t.fromLabel)){row.className='match-team tbd';row.innerHTML=`<span class="flag">🏳</span><span class="name" style="font-size:.6rem;">${t.fromLabel||'TBD'}</span>`;}
+      else if(!t.code){row.className='match-team tbd';row.innerHTML='<span class="flag">—</span><span class="name">TBD</span>';}
+      else{const isW=winner&&winner===t.code,isL=winner&&winner!==t.code;row.className='match-team'+(isW?' winner':'')+(isL?' loser':'');row.innerHTML=`<span class="flag">${t.flag}</span><span class="name">${t.name}</span>`;}
       card.appendChild(row);
     });
     return card;
@@ -1770,11 +1797,18 @@ function startPolling(){
       if (!res.ok) return;
       const data = await res.json();
       const prev = JSON.stringify({liveResults, liveGroupStandings});
+      // Merge remote in, but never let a stale remote copy replace YOUR local picks
+      const remotePreds  = data.predictions || {};
+      const remoteGroups = data.groupPicks  || {};
+      const myPred  = currentUser ? predictions[currentUser] : null;
+      const myGroup = currentUser ? groupPicks[currentUser]  : null;
+      predictions = { ...remotePreds };
+      groupPicks  = { ...remoteGroups };
+      if (currentUser && myPred)  predictions[currentUser] = myPred;
+      if (currentUser && myGroup) groupPicks[currentUser]  = myGroup;
       liveResults        = data.liveResults        || liveResults;
       liveGroupStandings = data.liveGroupStandings || liveGroupStandings;
       liveTeams          = data.liveTeams          || liveTeams;
-      predictions        = data.predictions        || predictions;
-      groupPicks         = data.groupPicks          || groupPicks;
       const curr = JSON.stringify({liveResults, liveGroupStandings});
       if (prev !== curr) {
         renderDashboardIfVisible();
@@ -1885,6 +1919,10 @@ function renderDashboard(){
   }).sort((a,b)=>b.pts-a.pts);
 
   const max = ranked[0]?.pts || 1;
+  // Competition ranking: equal points share the same rank (everyone at 0pts is rank 1)
+  ranked.forEach((p, i) => {
+    p.rank = (i > 0 && p.pts === ranked[i-1].pts) ? ranked[i-1].rank : i + 1;
+  });
   // Can this user view others? They need to have their own group picks or bracket
   const myName = currentUser;
   const canViewOthers = myName && (
@@ -1894,7 +1932,7 @@ function renderDashboard(){
   );
 
   tbody.innerHTML = ranked.map((p,i) => {
-    const rank=i+1, rc=rank===1?'rank-1':rank===2?'rank-2':rank===3?'rank-3':'rank-n';
+    const rank=p.rank, rc=rank===1?'rank-1':rank===2?'rank-2':rank===3?'rank-3':'rank-n';
     const champ = predictions[p.name]?.final;
     const cd = champ ? `${TEAMS[champ]?.flag||''} ${TEAMS[champ]?.name||champ}` : '—';
     const pct = max ? Math.round(p.pts/max*100) : 0;
@@ -2211,11 +2249,15 @@ function showExistingParticipants() {
 function renderHomeLandingParticipants() {
   const el = document.getElementById('existing-list-home');
   if (!el) return;
-  const names = Object.keys(predictions);
+  // Include anyone with a bracket entry OR group picks (same sources as the dashboard)
+  const names = [...new Set([
+    ...Object.keys(predictions),
+    ...Object.keys(groupPicks).filter(n => groupPicks[n] && Object.keys(groupPicks[n]).length > 0),
+  ])];
   if (!names.length) { el.innerHTML = '<p class="text-muted" style="font-size:.8rem;padding:8px 0;">No participants yet!</p>'; return; }
   el.innerHTML = names.map(n => {
     const gp = groupPicks[n] ? Object.keys(groupPicks[n]).length : 0;
-    const kp = predictions[n].submitted ? '✅' : (predictions[n].r32?.some(Boolean) ? '🔄' : '—');
+    const kp = predictions[n]?.submitted ? '✅' : (predictions[n]?.r32?.some(Boolean) ? '🔄' : '—');
     return `<div class="participant-item" onclick="quickLoadUser('${escHtml(n)}')">
       <div><div class="p-name">${escHtml(n)}</div>
       <div class="p-status">Groups: ${gp}/12 · Bracket: ${kp}</div></div>
