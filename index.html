@@ -1541,7 +1541,7 @@ function _renderBracketTree(b, forceReadOnly) {
     body.appendChild(col);
   }
 
-  addCol('r32',16,i=>getMatchTeamObjects(b,'r32',i),i=>liveResults[`r32_${i}`]||null,i=>`r32_${i}`);
+  addCol('r32',16,i=>getMatchTeamObjects(b,'r32',i),i=>b.r32[i]||null,i=>`r32_${i}`);
   addCol('r16',8, i=>getMatchTeamObjects(b,'r16',i),i=>b.r16[i]||null,i=>`r16_${i}`);
   addCol('qf', 4, i=>getMatchTeamObjects(b,'qf',i), i=>b.qf[i]||null, i=>`qf_${i}`);
   addCol('sf', 2, i=>getMatchTeamObjects(b,'sf',i), i=>b.sf[i]||null, i=>`sf_${i}`);
@@ -1621,6 +1621,8 @@ function drawConnectors(svg,wrap,slotEls) {
 ══════════════════════════════════════════════════════════════════ */
 function makePick(round,idx,code){
   if(predictions[currentUser]?.submitted)return;
+  // Safety: ensure pick arrays exist before mutating (legacy/partial entries).
+  myPicks = normalizePicks(myPicks);
   const tog=(arr,i,c)=>{arr[i]=arr[i]===c?null:c;};
   if(round==='r32'){tog(myPicks.r32,idx,code);invalidateDown('r32',idx);}
   else if(round==='r16'){tog(myPicks.r16,idx,code);invalidateDown('r16',idx);}
@@ -1628,6 +1630,13 @@ function makePick(round,idx,code){
   else if(round==='sf'){tog(myPicks.sf,idx,code);checkTpFin();}
   else if(round==='tp'){myPicks.tp=myPicks.tp===code?null:code;}
   else if(round==='final'){myPicks.final=myPicks.final===code?null:code;}
+  // Persist in-progress picks (not yet submitted) so leaving and coming back,
+  // or a refresh, doesn't lose them. Keep the existing submitted flag as-is.
+  if(currentUser){
+    const wasSubmitted = predictions[currentUser]?.submitted || false;
+    predictions[currentUser] = {...JSON.parse(JSON.stringify(myPicks)), submitted: wasSubmitted};
+    savePredictions();
+  }
   renderMyBracket();
 }
 function invalidateDown(round,idx){
@@ -1796,12 +1805,32 @@ function goToVenmo(){
 function confirmVenmo(){
   // Deprecated — handled by confirmVenmoPhase1/Phase2
 }
+// Guarantee a picks object has every round array/field with the right length.
+// Older or partially-saved entries may be missing r32/r16/qf/sf, which would
+// crash makePick() the moment a team is clicked. This makes the shape safe.
+function normalizePicks(p){
+  p = p || {};
+  const fix = (arr,n) => {
+    const a = Array.isArray(arr) ? arr.slice(0,n) : [];
+    while (a.length < n) a.push(null);
+    return a;
+  };
+  p.r32 = fix(p.r32,16);
+  p.r16 = fix(p.r16,8);
+  p.qf  = fix(p.qf,4);
+  p.sf  = fix(p.sf,2);
+  if (!('tp'    in p)) p.tp    = null;
+  if (!('final' in p)) p.final = null;
+  return p;
+}
 function loadParticipant(name){
   loadGroupState();
   currentUser=name;
   viewingUser=name;
   if(!predictions[name]){predictions[name]={r32:Array(16).fill(null),r16:Array(8).fill(null),qf:Array(4).fill(null),sf:Array(2).fill(null),tp:null,final:null,submitted:false};savePredictions();}
-  myPicks=JSON.parse(JSON.stringify(predictions[name]));
+  // Normalize the stored entry too, so any legacy/partial bracket is repaired.
+  predictions[name]=normalizePicks(predictions[name]);
+  myPicks=normalizePicks(JSON.parse(JSON.stringify(predictions[name])));
   // Save session
   try { localStorage.setItem('wc26_session', name); } catch(e){}
 }
