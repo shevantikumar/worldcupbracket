@@ -1750,32 +1750,33 @@ function updateBracketScreenHeader(){
   const isOther = viewingUser && viewingUser !== currentUser;
   const displayName = viewingUser || currentUser;
 
-  // Name / badge row
-  document.getElementById('bracket-user-name').textContent = isOther
-    ? `👁 ${displayName}'s bracket`
-    : `👤 ${displayName}`;
+  // Small helpers so a single missing element can never abort the whole header
+  // update (which would leave the bracket body un-rendered / blank).
+  const $ = id => document.getElementById(id);
+  const setText   = (id, txt) => { const el = $(id); if (el) el.textContent = txt; };
+  const toggleHid = (id, on)  => { const el = $(id); if (el) el.classList.toggle('hidden', on); };
 
-  const lockedBadge = document.getElementById('bracket-locked-badge');
-  lockedBadge.classList.toggle('hidden', isOther || !predictions[currentUser]?.submitted);
+  // Name in the phase-2 header
+  setText('p2-active-name', displayName || '');
 
-  const deadlinePassed = Date.now() >= DEADLINE_UTC || !!predictions[currentUser]?.deadlineLocked;
+  toggleHid('bracket-locked-badge', isOther || !predictions[currentUser]?.submitted);
+
+  const deadlinePassed   = Date.now() >= DEADLINE_UTC || !!predictions[currentUser]?.deadlineLocked;
   const alreadySubmitted = predictions[currentUser]?.submitted;
   // Buttons
-  document.getElementById('submit-btn').classList.toggle('hidden', isOther || alreadySubmitted || deadlinePassed);
-  document.getElementById('reset-btn').classList.toggle('hidden', isOther || !alreadySubmitted || deadlinePassed);
-  document.getElementById('back-to-mine-btn').classList.toggle('hidden', !isOther);
-  document.getElementById('switch-btn').classList.toggle('hidden', isOther);
+  toggleHid('submit-btn',       isOther || alreadySubmitted || deadlinePassed);
+  toggleHid('reset-btn',        isOther || !alreadySubmitted || deadlinePassed);
+  toggleHid('back-to-mine-btn', !isOther);
+  toggleHid('switch-btn',       isOther);
 
   // View banner
-  const banner = document.getElementById('view-banner');
-  const instructions = document.getElementById('pick-instructions');
   if (isOther) {
-    banner.classList.remove('hidden');
-    document.getElementById('view-banner-name').textContent = displayName;
-    instructions.classList.add('hidden');
+    toggleHid('view-banner', false);
+    setText('view-banner-name', displayName);
+    toggleHid('pick-instructions', true);
   } else {
-    banner.classList.add('hidden');
-    instructions.classList.remove('hidden');
+    toggleHid('view-banner', true);
+    toggleHid('pick-instructions', false);
   }
 }
 
