@@ -1411,7 +1411,12 @@ function renderLiveBracket() {
 const SLOT_H = 90; // px per R32 slot
 
 function renderMyBracket() {
-  applyConfirmedR32();  // guarantee R32 teams are present before rendering
+  // Guarantee R32 matchups exist before rendering (defensive: fill even if stale empty data loaded)
+  applyConfirmedR32();
+  // Extra safety: if liveTeams somehow lacks R32 data, force-fill from the confirmed bracket
+  for (let i = 0; i < 16; i++) {
+    if (!liveTeams[`r32_${i}`] && R32_CONFIRMED[i]) liveTeams[`r32_${i}`] = [...R32_CONFIRMED[i]];
+  }
   const isOther = viewingUser && viewingUser !== currentUser;
   const picks = isOther ? predictions[viewingUser] : myPicks;
   const b = buildBracket(picks || {});
@@ -3031,7 +3036,17 @@ function adminClearAllBrackets() {
 
   seedR32Teams();
   refreshGroupStandings();  // compute standings from any group results already in
-  applyConfirmedR32();      // fill the R32 bracket with confirmed matchups
+
+  // ONE-TIME MIGRATION (v2): older builds may have written incorrect R32 team pairs
+  // (group-representative guesses) into liveTeams/JSONBin. Force them to the confirmed
+  // official bracket so everyone sees the correct Round of 32 matchups.
+  if (localStorage.getItem('wc26_r32fix_v2') !== '1') {
+    R32_CONFIRMED.forEach((pair, i) => { liveTeams[`r32_${i}`] = [...pair]; });
+    saveTeams();
+    localStorage.setItem('wc26_r32fix_v2', '1');
+  }
+
+  applyConfirmedR32();      // fill any remaining empty R32 slots with confirmed matchups
 
   // ONE-TIME MIGRATION: an earlier build had the knockout deadline set to Jun 11,
   // which wrongly auto-locked everyone's bracket. Clear those stale locks now that
