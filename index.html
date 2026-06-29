@@ -2843,7 +2843,7 @@ function backToMine() {
 // Phase deadlines
 const PHASE1_DEADLINE = new Date('2026-06-11T19:00:00Z').getTime(); // Jun 11 12PM PT
 const PHASE2_OPEN     = new Date('2026-06-11T19:00:00Z').getTime(); // Opens once group stage picks lock (Jun 11 12PM PT)
-const PHASE2_DEADLINE = new Date('2026-06-29T06:59:00Z').getTime(); // Jun 28 11:59 PM PT (before R32 day 1 done)
+const PHASE2_DEADLINE = DEADLINE_UTC; // single source of truth — Jun 29 1:00 PM PT knockout lock
 
 // Group stage matches: { id, home, away, date, time_pt, venue }
 const GROUP_MATCHES = {
