@@ -385,7 +385,7 @@ label{display:block;font-size:.75rem;font-weight:600;color:var(--muted);margin-b
         <div class="pc-timer p2-timer" id="p2-card-timer">
           <div class="pct-label">Opens after groups finish</div>
           <div class="pct-count" id="p2-card-countdown">--d --h --m</div>
-          <div style="font-size:.6rem;color:var(--muted);margin-top:2px;">Jun 29 · 12:00 PM (noon) PT deadline</div>
+          <div style="font-size:.6rem;color:var(--muted);margin-top:2px;">Jun 29 · 1:00 PM PT deadline</div>
         </div>
         <div class="pc-status" id="p2-card-status">
           <span class="dot dot-waiting"></span>
@@ -526,7 +526,7 @@ label{display:block;font-size:.75rem;font-weight:600;color:var(--muted);margin-b
         <div class="timer-text">
           <div class="timer-label" id="bracket-timer-label">Phase 2 deadline — knockout picks</div>
           <div class="timer-countdown" id="timer-display">--:--:--:--</div>
-          <div class="timer-sub">Jun 29 · 12:00 PM (noon) PT</div>
+          <div class="timer-sub">Jun 29 · 1:00 PM PT</div>
         </div>
       </div>
       <div id="view-banner" class="view-banner hidden">
@@ -880,9 +880,9 @@ const CHAMPION_BONUS = 20;
    as 'legacy' — the default — preserves current production behavior exactly.
 ══════════════════════════════════════════════════════════════════ */
 const SCORING_CONFIG = {
-  // Active knockout scoring mode. 'legacy' = current live behavior (DEFAULT).
-  // 'partial' = new advancement-based partial-credit mode (opt-in only).
-  mode: 'legacy',
+  // Active knockout scoring mode. 'legacy' = original slot-exact behavior.
+  // 'partial' = advancement-based partial-credit mode (ACTIVE in the live app).
+  mode: 'partial',
 
   // Points for the 'partial' mode. Full = exact slot; advance = right team
   // reached the round but wrong slot. Legacy ROUND_POINTS are reused as the
@@ -2397,9 +2397,9 @@ window.addEventListener('resize',()=>{
 
 /* ══════════════════════════════════════════════════════════════════
    SUBMISSION DEADLINE TIMER
-   Deadline: Jun 29, 2026 12:00 PM (noon) PT = 19:00 UTC
+   Deadline: Jun 29, 2026 1:00 PM PT = 20:00 UTC
 ══════════════════════════════════════════════════════════════════ */
-const DEADLINE_UTC = new Date('2026-06-29T19:00:00Z').getTime(); // Jun 29 12:00 PM (noon) PT — knockout bracket lock
+const DEADLINE_UTC = new Date('2026-06-29T20:00:00Z').getTime(); // Jun 29 1:00 PM PT — knockout bracket lock (before Germany–Paraguay)
 
 function updateTimer() {
   const now  = Date.now();
