@@ -534,7 +534,7 @@ label{display:block;font-size:.75rem;font-weight:600;color:var(--muted);margin-b
       </div>
       <div class="round-instructions" id="pick-instructions">
         <strong>How to pick:</strong> Click the team you think wins each match. Winners advance automatically to the next round.
-        <strong>R32=4pt · R16=8pt · QF=15pt · SF=25pt · 3rd=15pt · Final=40pt · Champion bonus=30pt</strong>
+        <strong>R32=4pt · R16=8pt · QF=15pt · SF=25pt · 3rd=8pt · Final=40pt · Champion bonus=20pt</strong>
       </div>
       <div class="bracket-scroller">
         <div class="bracket-svg-wrap" id="my-bracket-wrap">
@@ -619,9 +619,9 @@ label{display:block;font-size:.75rem;font-weight:600;color:var(--muted);margin-b
       <span class="score-pill tag-r16">R16: 8pt</span>
       <span class="score-pill tag-qf">QF: 15pt</span>
       <span class="score-pill tag-sf">SF: 25pt</span>
-      <span class="score-pill tag-tp">3rd: 15pt</span>
+      <span class="score-pill tag-tp">3rd: 8pt</span>
       <span class="score-pill tag-final">Final: 40pt</span>
-      <span class="score-pill" style="background:rgba(240,180,41,.15);color:var(--gold);border:1px solid var(--gold);">Champion: +30pt</span>
+      <span class="score-pill" style="background:rgba(240,180,41,.15);color:var(--gold);border:1px solid var(--gold);">Champion: +20pt</span>
     </div>
     <div style="overflow-x:auto;margin-top:10px;">
       <table class="leaderboard">
@@ -857,8 +857,142 @@ const R16_PAIRS = [[0,1],[2,3],[4,5],[6,7],[8,9],[10,11],[12,13],[14,15]];
 const QF_PAIRS  = [[0,1],[2,3],[4,5],[6,7]];
 const SF_PAIRS  = [[0,1],[2,3]];
 
-const ROUND_POINTS  = {r32:4, r16:8, qf:15, sf:25, tp:15, final:40};
-const CHAMPION_BONUS = 30;
+const ROUND_POINTS  = {r32:4, r16:8, qf:15, sf:25, tp:8, final:40};
+const CHAMPION_BONUS = 20;
+
+/* ══════════════════════════════════════════════════════════════════
+   SCORING MODES — modular & isolated
+   ──────────────────────────────────────────────────────────────────
+   The LIVE/PRODUCTION scoring is the 'legacy' mode and is the default.
+   It is never changed by anything here — calcScore() below still runs
+   the exact original logic, so historical brackets and the live app are
+   guaranteed identical.
+
+   A second, OPT-IN mode ('partial') adds partial credit for correctly
+   predicting that a team advances to a knockout round even if it lands in
+   the wrong bracket slot. It is only ever used when explicitly enabled
+   (feature flag / per-tournament config) and only affects KNOCKOUT rounds.
+   Group-stage scoring is untouched in every mode.
+
+   To enable the new mode for a FUTURE tournament, set:
+       SCORING_CONFIG.mode = 'partial'
+   (or pass an explicit mode to calcKnockoutScore(name, mode)). Leaving it
+   as 'legacy' — the default — preserves current production behavior exactly.
+══════════════════════════════════════════════════════════════════ */
+const SCORING_CONFIG = {
+  // Active knockout scoring mode. 'legacy' = current live behavior (DEFAULT).
+  // 'partial' = new advancement-based partial-credit mode (opt-in only).
+  mode: 'legacy',
+
+  // Points for the 'partial' mode. Full = exact slot; advance = right team
+  // reached the round but wrong slot. Legacy ROUND_POINTS are reused as the
+  // "full" values so a perfect bracket scores the same in both modes.
+  partial: {
+    full:    {r32:4, r16:8, qf:15, sf:25, tp:8, final:40},
+    advance: {r32:2, r16:4, qf:7,  sf:12, tp:4, final:20},
+    championBonus: 20, // awarded only on an EXACT final winner (same as legacy)
+  },
+};
+
+// Knockout rounds that use slot arrays, with how many slots each has.
+const KO_ARRAY_ROUNDS = [
+  {key:'r32', slots:16},
+  {key:'r16', slots:8},
+  {key:'qf',  slots:4},
+  {key:'sf',  slots:2},
+];
+
+// Actual teams that reached a round = winners recorded in liveResults.
+// Returns { bySlot: {idx:code}, set: Set(codes) }.
+function actualRound(roundKey, slots){
+  const bySlot = {}; const set = new Set();
+  for(let i=0;i<slots;i++){
+    const c = liveResults[`${roundKey}_${i}`];
+    if(c){ bySlot[i]=c; set.add(c); }
+  }
+  return { bySlot, set };
+}
+
+/* ── NEW MODE: advancement-based partial credit (knockout only) ──────
+   For each knockout round:
+     • Full points  — predicted team is in the correct slot.
+     • Partial pts  — predicted team actually reached the round but in a
+                      different slot than predicted.
+     • Zero         — predicted team didn't reach the round.
+   No double-counting: each actual advancing team yields full OR partial,
+   never both. We never award partial for a team that already earned full,
+   and we credit at most one partial per actual advancing team.            */
+function scoreKnockoutPartial(pred){
+  const P = SCORING_CONFIG.partial;
+  let s = 0;
+
+  KO_ARRAY_ROUNDS.forEach(({key, slots}) => {
+    const actual = actualRound(key, slots);
+    if (actual.set.size === 0) return; // round not played yet
+
+    const picks = pred[key] || [];
+
+    // 1) Full credit: exact slot matches. Track which actual teams are "used"
+    //    so they can't also earn partial credit (no double counting).
+    const fullCredited = new Set();
+    for (let i = 0; i < slots; i++) {
+      const p = picks[i];
+      if (p && actual.bySlot[i] === p) {
+        s += P.full[key];
+        fullCredited.add(p);
+      }
+    }
+
+    // 2) Partial credit: a predicted team that actually reached the round but
+    //    was NOT already full-credited, and isn't sitting in its correct slot.
+    //    Count each actual advancing team at most once.
+    const partialCredited = new Set();
+    for (let i = 0; i < slots; i++) {
+      const p = picks[i];
+      if (!p) continue;
+      if (fullCredited.has(p)) continue;       // already earned full
+      if (partialCredited.has(p)) continue;    // already earned one partial
+      if (actual.set.has(p)) {                 // team really did advance…
+        // …but not in this exact slot (else it'd be full). Award partial.
+        s += P.advance[key];
+        partialCredited.add(p);
+      }
+    }
+  });
+
+  // 3rd-place game (single slot) — exact only (no "slot" concept to be partial).
+  if (pred.tp && liveResults.tp === pred.tp) s += P.full.tp;
+
+  // Final — exact winner earns full + champion bonus. Reaching the final but
+  // not winning it (i.e., the predicted champion was the runner-up) earns the
+  // 'advance' partial for the final round.
+  if (pred.final){
+    if (liveResults.final === pred.final){
+      s += P.full.final + P.championBonus;
+    } else {
+      // Did the predicted champion at least reach the final (win their SF)?
+      const finalists = new Set([liveResults.sf_0, liveResults.sf_1].filter(Boolean));
+      if (finalists.has(pred.final)) s += P.advance.final;
+    }
+  }
+
+  return s;
+}
+
+// Modular registry: add future modes here without touching existing ones.
+const SCORING_MODES = {
+  legacy:  (name) => legacyKnockoutScore(name),   // current production logic
+  partial: (name) => scoreKnockoutPartial(predictions[name] || {}),
+};
+
+// Public entry point for KNOCKOUT scoring. Defaults to the configured mode,
+// but a mode can be passed explicitly (used by tests / future tournaments).
+function calcKnockoutScore(name, mode){
+  const m = mode || SCORING_CONFIG.mode || 'legacy';
+  const fn = SCORING_MODES[m] || SCORING_MODES.legacy;
+  return fn(name);
+}
+
 
 /* ══════════════════════════════════════════════════════════════════
    STATE
@@ -2085,8 +2219,13 @@ function toggleAdmin(){
 /* ══════════════════════════════════════════════════════════════════
    SCORING
 ══════════════════════════════════════════════════════════════════ */
-function calcScore(name){
-  const pred=predictions[name];if(!pred||!pred.submitted)return 0;let s=0;
+// LEGACY knockout scoring — the exact original production logic, unchanged.
+// Kept as its own function so the mode registry can reference it and so the
+// live behavior is provably identical to before.
+function legacyKnockoutScore(name){
+  const pred=predictions[name];
+  if(!pred)return 0;
+  let s=0;
   (pred.r32||[]).forEach((p,i)=>{if(p&&liveResults[`r32_${i}`]===p)s+=ROUND_POINTS.r32;});
   (pred.r16||[]).forEach((p,i)=>{if(p&&liveResults[`r16_${i}`]===p)s+=ROUND_POINTS.r16;});
   (pred.qf ||[]).forEach((p,i)=>{if(p&&liveResults[`qf_${i}`] ===p)s+=ROUND_POINTS.qf;});
@@ -2094,6 +2233,19 @@ function calcScore(name){
   if(pred.tp&&liveResults.tp===pred.tp)s+=ROUND_POINTS.tp;
   if(pred.final&&liveResults.final===pred.final){s+=ROUND_POINTS.final;s+=CHAMPION_BONUS;}
   return s;
+}
+
+function calcScore(name){
+  const pred=predictions[name];
+  if(!pred)return 0;
+  // A bracket scores if it was submitted, OR the deadline has passed (at which
+  // point every bracket is final). This makes scoring robust to the "edited but
+  // didn't re-click Submit" edge case.
+  const scorable = pred.submitted || Date.now() >= DEADLINE_UTC;
+  if(!scorable)return 0;
+  // Delegate to the configured knockout scoring mode. Default 'legacy' returns
+  // exactly the original totals, so live/production scoring is unchanged.
+  return calcKnockoutScore(name);
 }
 function calcBreakdown(name){
   const pred=predictions[name];if(!pred)return{r32:0,r16:0,qf:0,sf:0,tp:0,fin:0};
@@ -2284,24 +2436,40 @@ function updateTimer() {
   setTimerEl('deadline-timer-bar',   'timer-display');
   setTimerEl('landing-timer-bar',    'landing-timer-display');
 
-  // When deadline passes: disable submit, and auto-lock all unsubmitted brackets
+  // When deadline passes: disable submit, and auto-lock all brackets
   if (expired) {
     const sb = document.getElementById('submit-btn');
     if (sb) { sb.disabled = true; sb.textContent = '🔒 Deadline Passed'; }
 
-    // Lock every bracket that exists (submitted or not) so nothing can change
+    // Lock every bracket so nothing can change, AND auto-finalize any bracket
+    // that has picks but was never explicitly (re)submitted — so those players
+    // still score for what they got right instead of silently counting 0.
+    // (Editing after submit clears the submitted flag; this rescues anyone who
+    // edited last and didn't re-click Submit before the buzzer.)
     let changed = false;
     Object.keys(predictions).forEach(name => {
-      if (!predictions[name].deadlineLocked) {
-        predictions[name].deadlineLocked = true;
-        changed = true;
-      }
+      const p = predictions[name];
+      if (!p) return;
+      if (!p.deadlineLocked) { p.deadlineLocked = true; changed = true; }
+      if (!p.submitted && hasAnyPick(p)) { p.submitted = true; changed = true; }
     });
     if (changed) savePredictions();
 
     // Re-render bracket screen header to reflect locked state
     if (currentUser) updateBracketScreenHeader();
   }
+}
+
+// True if a bracket has at least one knockout pick anywhere (so it should score).
+function hasAnyPick(p){
+  if (!p) return false;
+  return !!(
+    (Array.isArray(p.r32) && p.r32.some(Boolean)) ||
+    (Array.isArray(p.r16) && p.r16.some(Boolean)) ||
+    (Array.isArray(p.qf)  && p.qf.some(Boolean))  ||
+    (Array.isArray(p.sf)  && p.sf.some(Boolean))  ||
+    p.tp || p.final
+  );
 }
 
 function startTimer() {
