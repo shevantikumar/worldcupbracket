@@ -385,7 +385,7 @@ label{display:block;font-size:.75rem;font-weight:600;color:var(--muted);margin-b
         <div class="pc-timer p2-timer" id="p2-card-timer">
           <div class="pct-label">Opens after groups finish</div>
           <div class="pct-count" id="p2-card-countdown">--d --h --m</div>
-          <div style="font-size:.6rem;color:var(--muted);margin-top:2px;">Jun 28 · 11:59 PM PT deadline</div>
+          <div style="font-size:.6rem;color:var(--muted);margin-top:2px;">Jun 29 · 12:00 PM (noon) PT deadline</div>
         </div>
         <div class="pc-status" id="p2-card-status">
           <span class="dot dot-waiting"></span>
@@ -526,7 +526,7 @@ label{display:block;font-size:.75rem;font-weight:600;color:var(--muted);margin-b
         <div class="timer-text">
           <div class="timer-label" id="bracket-timer-label">Phase 2 deadline — knockout picks</div>
           <div class="timer-countdown" id="timer-display">--:--:--:--</div>
-          <div class="timer-sub">Jun 28 · 11:59 PM PT · Before R32 day 1 ends!</div>
+          <div class="timer-sub">Jun 29 · 12:00 PM (noon) PT</div>
         </div>
       </div>
       <div id="view-banner" class="view-banner hidden">
@@ -940,6 +940,16 @@ async function syncToJSONBin() {
         if (currentUser) {
           if (predictions[currentUser]) mergedPreds[currentUser]  = predictions[currentUser];
           if (groupPicks[currentUser])  mergedGroups[currentUser] = groupPicks[currentUser];
+        }
+        // SAFETY: while before the deadline, strip any stale lock flag from every
+        // bracket so no participant is ever frozen out. Never touches anyone's picks.
+        if (Date.now() < DEADLINE_UTC) {
+          Object.keys(mergedPreds).forEach(n => {
+            if (mergedPreds[n] && mergedPreds[n].deadlineLocked) {
+              mergedPreds[n] = { ...mergedPreds[n] };
+              delete mergedPreds[n].deadlineLocked;
+            }
+          });
         }
         predictions = mergedPreds;
         groupPicks  = mergedGroups;
@@ -1430,10 +1440,11 @@ function _renderBracketTree(b, forceReadOnly) {
   const wrap    = document.getElementById('my-bracket-wrap');
   header.innerHTML=''; body.innerHTML=''; svg.innerHTML='';
 
-  // locked = read-only: bracket submitted, deadline passed, or viewing someone else
-  const deadlinePassed = Date.now() >= DEADLINE_UTC || !!predictions[currentUser]?.deadlineLocked;
-  const ownerSubmitted = predictions[currentUser]?.submitted;
-  const locked = forceReadOnly || ownerSubmitted || deadlinePassed;
+  // Read-only ONLY when: viewing someone else's bracket, or the real deadline
+  // has passed. A submitted bracket stays fully editable until the deadline so
+  // users can reopen, change picks, and resubmit any number of times.
+  const deadlinePassed = Date.now() >= DEADLINE_UTC;
+  const locked = forceReadOnly || deadlinePassed;
 
   const ROUNDS = [
     {key:'r32',label:'Round of 32',  cls:'rh-r32',count:16},
@@ -1620,7 +1631,9 @@ function drawConnectors(svg,wrap,slotEls) {
    MY BRACKET PICKS
 ══════════════════════════════════════════════════════════════════ */
 function makePick(round,idx,code){
-  if(predictions[currentUser]?.submitted)return;
+  // Only the real deadline blocks edits. A submitted bracket is still editable
+  // until then (editing it simply re-opens it for resubmission).
+  if(Date.now() >= DEADLINE_UTC){ toast('⏰ Deadline passed — brackets are locked!'); return; }
   // Safety: ensure pick arrays exist before mutating (legacy/partial entries).
   myPicks = normalizePicks(myPicks);
   const tog=(arr,i,c)=>{arr[i]=arr[i]===c?null:c;};
@@ -1630,13 +1643,14 @@ function makePick(round,idx,code){
   else if(round==='sf'){tog(myPicks.sf,idx,code);checkTpFin();}
   else if(round==='tp'){myPicks.tp=myPicks.tp===code?null:code;}
   else if(round==='final'){myPicks.final=myPicks.final===code?null:code;}
-  // Persist in-progress picks (not yet submitted) so leaving and coming back,
-  // or a refresh, doesn't lose them. Keep the existing submitted flag as-is.
+  // Persist progress so leaving/refresh never loses picks. Editing after a
+  // submit re-opens the bracket (submitted=false) until they resubmit.
   if(currentUser){
-    const wasSubmitted = predictions[currentUser]?.submitted || false;
-    predictions[currentUser] = {...JSON.parse(JSON.stringify(myPicks)), submitted: wasSubmitted};
+    predictions[currentUser] = {...JSON.parse(JSON.stringify(myPicks)), submitted: false};
+    if(predictions[currentUser].deadlineLocked) delete predictions[currentUser].deadlineLocked;
     savePredictions();
   }
+  updateBracketScreenHeader();
   renderMyBracket();
 }
 function invalidateDown(round,idx){
@@ -1768,15 +1782,32 @@ function updateBracketScreenHeader(){
   // Name in the phase-2 header
   setText('p2-active-name', displayName || '');
 
-  toggleHid('bracket-locked-badge', isOther || !predictions[currentUser]?.submitted);
+  // Badge: show "Submitted" while editable+submitted, "Locked" after deadline.
+  const deadlineNow = Date.now() >= DEADLINE_UTC;
+  const badgeEl = $('bracket-locked-badge');
+  if (badgeEl) {
+    const showBadge = !isOther && (predictions[currentUser]?.submitted || deadlineNow);
+    badgeEl.classList.toggle('hidden', !showBadge);
+    badgeEl.textContent = deadlineNow ? '🔒 Locked' : '✅ Submitted';
+  }
 
-  const deadlinePassed   = Date.now() >= DEADLINE_UTC || !!predictions[currentUser]?.deadlineLocked;
+  const deadlinePassed   = Date.now() >= DEADLINE_UTC;
   const alreadySubmitted = predictions[currentUser]?.submitted;
-  // Buttons
-  toggleHid('submit-btn',       isOther || alreadySubmitted || deadlinePassed);
-  toggleHid('reset-btn',        isOther || !alreadySubmitted || deadlinePassed);
+  // Buttons: while editable (own bracket, before deadline) the Submit button is
+  // always available so users can (re)submit after edits. After the deadline,
+  // everything locks. "Reset" is no longer needed because editing a submitted
+  // bracket simply re-opens it, but we keep it hidden for safety.
+  toggleHid('submit-btn',       isOther || deadlinePassed);
+  toggleHid('reset-btn',        true);
   toggleHid('back-to-mine-btn', !isOther);
   toggleHid('switch-btn',       isOther);
+
+  // Update the submit button label to reflect submitted/edit state
+  const submitBtn = $('submit-btn');
+  if (submitBtn && !isOther && !deadlinePassed) {
+    submitBtn.textContent = alreadySubmitted ? '✅ Submitted — Update' : 'Submit & Lock';
+    submitBtn.disabled = false;
+  }
 
   // View banner
   if (isOther) {
@@ -1843,11 +1874,14 @@ function switchUser(){
 function submitBracket(){
   if(!currentUser) return;
   if(Date.now() >= DEADLINE_UTC){ toast('⏰ Deadline passed — brackets are locked!'); return; }
-  predictions[currentUser]={...myPicks,submitted:true};
+  myPicks = normalizePicks(myPicks);
+  const saved = {...JSON.parse(JSON.stringify(myPicks)), submitted:true};
+  delete saved.deadlineLocked;
+  predictions[currentUser] = saved;
   savePredictions();
   updateBracketScreenHeader();
   renderMyBracket();
-  toast('🎉 Bracket locked! Good luck!');
+  toast('🎉 Bracket submitted! You can still edit it until the deadline.');
 }
 function resetMyBracket(){
   if(Date.now() >= DEADLINE_UTC){ toast('⏰ Deadline passed — brackets are locked!'); return; }
@@ -2211,9 +2245,9 @@ window.addEventListener('resize',()=>{
 
 /* ══════════════════════════════════════════════════════════════════
    SUBMISSION DEADLINE TIMER
-   Deadline: Jun 28, 2026 12:00 PM PT = 19:00 UTC
+   Deadline: Jun 29, 2026 12:00 PM (noon) PT = 19:00 UTC
 ══════════════════════════════════════════════════════════════════ */
-const DEADLINE_UTC = new Date('2026-06-29T06:59:00Z').getTime(); // Jun 28 11:59 PM PT — knockout bracket lock
+const DEADLINE_UTC = new Date('2026-06-29T19:00:00Z').getTime(); // Jun 29 12:00 PM (noon) PT — knockout bracket lock
 
 function updateTimer() {
   const now  = Date.now();
@@ -3078,13 +3112,19 @@ function adminClearAllBrackets() {
 
   applyConfirmedR32();      // fill any remaining empty R32 slots with confirmed matchups
 
-  // ONE-TIME MIGRATION: an earlier build had the knockout deadline set to Jun 11,
-  // which wrongly auto-locked everyone's bracket. Clear those stale locks now that
-  // the deadline is correctly Jun 28. Runs once, then records it so it won't repeat.
-  if (!localStorage.getItem('wc26_unlock_v1')) {
+  // UNLOCK GUARD: if we are still before the real deadline, clear any stale
+  // deadlineLocked flags on EVERY bracket. Earlier builds (and an earlier,
+  // earlier-than-intended deadline) wrote these flags into the shared store,
+  // which wrongly froze some users out (couldn't pick or submit). Clearing them
+  // while before the deadline is always safe, and persists for everyone via sync.
+  // Runs on every load (not one-time) so no affected user stays locked.
+  if (Date.now() < DEADLINE_UTC) {
     let unlocked = false;
     Object.keys(predictions).forEach(name => {
-      if (predictions[name].deadlineLocked) { delete predictions[name].deadlineLocked; unlocked = true; }
+      if (predictions[name] && predictions[name].deadlineLocked) {
+        delete predictions[name].deadlineLocked;
+        unlocked = true;
+      }
     });
     if (unlocked) { savePredictions(); }
     localStorage.setItem('wc26_unlock_v1', '1');
