@@ -1062,21 +1062,50 @@ async function syncToJSONBin() {
   try {
     // MERGE-BEFORE-WRITE: pull the latest server state first so we never
     // overwrite picks another friend just submitted from their device.
+    let mergeOk = false;
     try {
       const latest = await fetch(JB_URL + '/latest', {
         headers: { 'X-Master-Key': JB_KEY, 'X-Bin-Meta': 'false' }
       });
       if (latest.ok) {
         const remote = await latest.json();
-        // Keep every remote entry; our own user's local entries win for ourselves.
-        const mergedPreds  = { ...(remote.predictions||{}), };
-        const mergedGroups = { ...(remote.groupPicks ||{}), };
+        // UNION of remote + local. Start from every remote entry so we can NEVER
+        // drop a bracket that exists on the server (the data-loss bug). Then layer
+        // local entries on top, but only when the local copy is non-empty — an
+        // empty/normalized local stub must never clobber a real saved bracket.
+        const mergedPreds  = { ...(remote.predictions||{}) };
+        const mergedGroups = { ...(remote.groupPicks ||{}) };
+
+        const hasPicks = p => !!(p && (
+          (Array.isArray(p.r32)&&p.r32.some(Boolean)) ||
+          (Array.isArray(p.r16)&&p.r16.some(Boolean)) ||
+          (Array.isArray(p.qf) &&p.qf.some(Boolean))  ||
+          (Array.isArray(p.sf) &&p.sf.some(Boolean))  ||
+          p.tp || p.final));
+
+        // Only the CURRENT user's own entry is authoritative-from-this-device,
+        // and only if it actually has content (or the server had nothing for them).
         if (currentUser) {
-          if (predictions[currentUser]) mergedPreds[currentUser]  = predictions[currentUser];
-          if (groupPicks[currentUser])  mergedGroups[currentUser] = groupPicks[currentUser];
+          const localP = predictions[currentUser];
+          if (localP && (hasPicks(localP) || !mergedPreds[currentUser])) {
+            mergedPreds[currentUser] = localP;
+          }
+          const localG = groupPicks[currentUser];
+          if (localG && (Object.keys(localG).length || !mergedGroups[currentUser])) {
+            mergedGroups[currentUser] = localG;
+          }
         }
-        // SAFETY: while before the deadline, strip any stale lock flag from every
-        // bracket so no participant is ever frozen out. Never touches anyone's picks.
+
+        // Carry over any OTHER local entries the server doesn't have yet (e.g. a
+        // bracket created offline), but never let a local stub overwrite a real
+        // remote bracket for someone else.
+        Object.keys(predictions).forEach(n => {
+          if (n === currentUser) return;
+          if (!mergedPreds[n] && hasPicks(predictions[n])) mergedPreds[n] = predictions[n];
+        });
+
+        // SAFETY: while before the deadline, strip any stale lock flag so no one
+        // is frozen out. Never touches picks.
         if (Date.now() < DEADLINE_UTC) {
           Object.keys(mergedPreds).forEach(n => {
             if (mergedPreds[n] && mergedPreds[n].deadlineLocked) {
@@ -1085,14 +1114,29 @@ async function syncToJSONBin() {
             }
           });
         }
+
         predictions = mergedPreds;
         groupPicks  = mergedGroups;
         // Admin-entered data: local wins per-key (only the admin edits these)
         liveResults        = { ...(remote.liveResults||{}),        ...liveResults };
         liveTeams          = { ...(remote.liveTeams||{}),          ...liveTeams };
         liveGroupStandings = { ...(remote.liveGroupStandings||{}), ...liveGroupStandings };
+        mergeOk = true;
       }
-    } catch(e) { /* merge fetch failed — proceed with local state */ }
+    } catch(e) { /* merge fetch failed */ }
+
+    // CRITICAL: if we could not read the latest server state, DO NOT overwrite
+    // the bin — writing our partial local view here is exactly what wiped
+    // brackets before. Mirror to localStorage and retry later instead.
+    if (!mergeOk) {
+      try { localStorage.setItem('wc26_preds',  JSON.stringify(predictions)); } catch(e){}
+      try { localStorage.setItem('wc26_gpicks', JSON.stringify(groupPicks)); } catch(e){}
+      console.warn('Sync aborted: could not fetch latest before write (no overwrite performed). Will retry.');
+      _saving = false;
+      if (_saveTimer) clearTimeout(_saveTimer);
+      _saveTimer = setTimeout(syncToJSONBin, 4000); // retry shortly
+      return;
+    }
 
     // Mirror to localStorage as backup
     try { localStorage.setItem('wc26_preds',  JSON.stringify(predictions)); } catch(e){}
@@ -2399,7 +2443,7 @@ window.addEventListener('resize',()=>{
    SUBMISSION DEADLINE TIMER
    Deadline: Jun 29, 2026 1:00 PM PT = 20:00 UTC
 ══════════════════════════════════════════════════════════════════ */
-const DEADLINE_UTC = new Date('2026-06-29T20:00:00Z').getTime(); // Jun 29 1:00 PM PT — knockout bracket lock (before Germany–Paraguay)
+const DEADLINE_UTC = new Date('2026-07-10T07:00:00Z').getTime(); // TEMPORARILY REOPENED — Jul 10 to let users refill lost picks. Set back when done.
 
 function updateTimer() {
   const now  = Date.now();
@@ -2441,18 +2485,17 @@ function updateTimer() {
     const sb = document.getElementById('submit-btn');
     if (sb) { sb.disabled = true; sb.textContent = '🔒 Deadline Passed'; }
 
-    // Lock every bracket so nothing can change, AND auto-finalize any bracket
-    // that has picks but was never explicitly (re)submitted — so those players
-    // still score for what they got right instead of silently counting 0.
-    // (Editing after submit clears the submitted flag; this rescues anyone who
-    // edited last and didn't re-click Submit before the buzzer.)
+    // Lock the CURRENT user's own bracket and auto-finalize it if it has picks
+    // but was never re-submitted. We intentionally do NOT loop over everyone
+    // else's brackets here: each client finalizes only its own, and the
+    // union-merge in syncToJSONBin preserves all other brackets. Mass-writing
+    // every bracket from every client at the buzzer is what risked data loss.
     let changed = false;
-    Object.keys(predictions).forEach(name => {
-      const p = predictions[name];
-      if (!p) return;
+    if (currentUser && predictions[currentUser]) {
+      const p = predictions[currentUser];
       if (!p.deadlineLocked) { p.deadlineLocked = true; changed = true; }
       if (!p.submitted && hasAnyPick(p)) { p.submitted = true; changed = true; }
-    });
+    }
     if (changed) savePredictions();
 
     // Re-render bracket screen header to reflect locked state
