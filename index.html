@@ -1010,6 +1010,19 @@ let activeRound  = 'groups';
    JSONBIN STORAGE — all shared data lives here
    Bin is private; API key is embedded (rotate after tournament ends)
 ══════════════════════════════════════════════════════════════════ */
+
+/* Resilient localStorage: some browsers (Safari Private Mode, storage full,
+   blocked cookies/storage) throw on localStorage access. If that happens we
+   transparently fall back to an in-memory store for this page session so the
+   app — and especially the saved-session name — keeps working instead of the
+   user's bracket appearing to vanish on reload. */
+const _memLS = {};
+const LS = {
+  get(k){ try { const v = window.localStorage.getItem(k); return v===null ? (k in _memLS ? _memLS[k] : null) : v; } catch(e){ return (k in _memLS) ? _memLS[k] : null; } },
+  set(k,v){ _memLS[k]=String(v); try { window.localStorage.setItem(k, String(v)); } catch(e){} },
+  remove(k){ delete _memLS[k]; try { window.localStorage.removeItem(k); } catch(e){} },
+};
+
 const JB_KEY = '$2a$10$UD/hoLkGzFHWfljnmxw6KuL9rHL.QEWMQNN1Fl.GJsqsWi5lq1Xfe';
 const JB_BIN = '6a2a5451f5f4af5e29dcf8b1';
 const JB_URL = `https://api.jsonbin.io/v3/b/${JB_BIN}`;
@@ -1017,6 +1030,7 @@ const JB_URL = `https://api.jsonbin.io/v3/b/${JB_BIN}`;
 let _saveTimer = null;   // debounce rapid saves into one request
 let _saving    = false;
 let _pendingSave = false;
+
 
 // Build the full data object to write to JSONBin
 function buildSaveData() {
@@ -2041,13 +2055,13 @@ function loadParticipant(name){
   predictions[name]=normalizePicks(predictions[name]);
   myPicks=normalizePicks(JSON.parse(JSON.stringify(predictions[name])));
   // Save session
-  try { localStorage.setItem('wc26_session', name); } catch(e){}
+  LS.set('wc26_session', name);
 }
 function switchUser(){
   currentUser=null;viewingUser=null;myPicks={};
   renderHomeLandingParticipants();
   // Clear saved session
-  try { localStorage.removeItem('wc26_session'); } catch(e){}
+  LS.remove('wc26_session');
 }
 function submitBracket(){
   if(!currentUser) return;
@@ -2189,6 +2203,10 @@ function startPolling(){
   setInterval(fetchLiveResults, 60000);
   // Also re-sync from JSONBin every 30s so admin results appear for all users
   setInterval(async ()=>{
+    // Don't poll-merge while a save is in flight or queued — reading the server
+    // mid-write can revert a just-submitted bracket. Also skip if the user is
+    // actively editing their bracket (we must never replace their working copy).
+    if (_saving || _pendingSave || _saveTimer) return;
     try {
       const res = await fetch(JB_URL + '/latest', {
         headers: { 'X-Master-Key': JB_KEY, 'X-Bin-Meta': 'false' }
@@ -2196,15 +2214,28 @@ function startPolling(){
       if (!res.ok) return;
       const data = await res.json();
       const prev = JSON.stringify({liveResults, liveGroupStandings});
-      // Merge remote in, but never let a stale remote copy replace YOUR local picks
+      // Merge remote in, but NEVER let a remote copy replace the current user's
+      // own bracket — their local copy is always authoritative for themselves.
       const remotePreds  = data.predictions || {};
       const remoteGroups = data.groupPicks  || {};
       const myPred  = currentUser ? predictions[currentUser] : null;
       const myGroup = currentUser ? groupPicks[currentUser]  : null;
       predictions = { ...remotePreds };
       groupPicks  = { ...remoteGroups };
-      if (currentUser && myPred)  predictions[currentUser] = myPred;
-      if (currentUser && myGroup) groupPicks[currentUser]  = myGroup;
+      // Restore the current user's own entry. Keep whichever copy has picks so a
+      // stale/empty remote can never blank out the user's bracket on screen.
+      const hasPicks = p => !!(p && (
+        (Array.isArray(p.r32)&&p.r32.some(Boolean)) ||
+        (Array.isArray(p.r16)&&p.r16.some(Boolean)) ||
+        (Array.isArray(p.qf) &&p.qf.some(Boolean))  ||
+        (Array.isArray(p.sf) &&p.sf.some(Boolean))  ||
+        p.tp || p.final));
+      if (currentUser) {
+        if (myPred && (hasPicks(myPred) || !remotePreds[currentUser])) {
+          predictions[currentUser] = myPred;
+        }
+        if (myGroup) groupPicks[currentUser] = myGroup;
+      }
       liveResults        = data.liveResults        || liveResults;
       liveGroupStandings = data.liveGroupStandings || liveGroupStandings;
       liveTeams          = data.liveTeams          || liveTeams;
@@ -2527,7 +2558,7 @@ function startTimer() {
 ══════════════════════════════════════════════════════════════════ */
 function restoreSession() {
   try {
-    const saved = localStorage.getItem('wc26_session');
+    const saved = LS.get('wc26_session');
     if (!saved) return false;
     const key = Object.keys(predictions).find(n => n.toLowerCase() === saved.toLowerCase());
     if (key) {
@@ -2620,14 +2651,14 @@ function confirmVenmoPhase1() {
     savePredictions();
   }
   currentUser = raw;
-  try { localStorage.setItem('wc26_session', raw); } catch(e){}
+  LS.set('wc26_session', raw);
   enterPhase1Picks(raw, false);
 }
 
 function enterPhase1Picks(name, readOnly) {
   viewingGroupUser = null; // viewing own picks
   currentUser = name;
-  try { localStorage.setItem('wc26_session', name); } catch(e){}
+  LS.set('wc26_session', name);
   hide('p1-name-entry'); hide('p1-venmo');
   show('p1-picks-ui');
   document.getElementById('p1-active-name').textContent = name;
@@ -2741,7 +2772,7 @@ function renderHomeLandingParticipants() {
 function quickLoadUser(name) {
   // From landing list — detect which phase they should go to
   currentUser = name;
-  try { localStorage.setItem('wc26_session', name); } catch(e){}
+  LS.set('wc26_session', name);
   // Open phase 1 if p2 not open, else p2
   if (isPhase2Open() && predictions[name]) {
     openPhase2();
@@ -2867,7 +2898,7 @@ function updateLandingCards() {
 /* ── Override switchUser to return to home ───────────────────── */
 function switchUser() {
   currentUser = null; viewingUser = null; myPicks = {};
-  try { localStorage.removeItem('wc26_session'); } catch(e){}
+  LS.remove('wc26_session');
   goHome();
 }
 
@@ -3287,7 +3318,7 @@ function adminClearAllBrackets() {
   savePredictions();
   saveResults();
   saveTeams();
-  try { localStorage.removeItem('wc26_session'); } catch(e){}
+  LS.remove('wc26_session');
   groupPicks = {}; liveGroupStandings = {};
   currentUser = null;
   viewingUser = null;
