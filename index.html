@@ -1023,8 +1023,12 @@ const LS = {
   remove(k){ delete _memLS[k]; try { window.localStorage.removeItem(k); } catch(e){} },
 };
 
-const JB_KEY = '$2a$10$UD/hoLkGzFHWfljnmxw6KuL9rHL.QEWMQNN1Fl.GJsqsWi5lq1Xfe';
-const JB_BIN = '6a2a5451f5f4af5e29dcf8b1';
+/* ── JSONBin credentials ─────────────────────────────────────────────
+   Migrated Jul 17 to a fresh free account (old account's quota was
+   exhausted). Nothing else in the file references the account — this
+   is the only place these values live. */
+const JB_KEY = '$2a$10$qZPMw6CtLrlybVPJXlTw4O4dJ6Pum3j/aQo0uCualLLCN0XsObQOS';
+const JB_BIN = '6a5abb1bf5f4af5e299ebf6f';
 const JB_URL = `https://api.jsonbin.io/v3/b/${JB_BIN}`;
 
 let _saveTimer = null;   // debounce rapid saves into one request
@@ -1117,6 +1121,12 @@ async function syncToJSONBin() {
           if (n === currentUser) return;
           if (!mergedPreds[n] && hasPicks(predictions[n])) mergedPreds[n] = predictions[n];
         });
+
+        // RESTORE: ensure Shevanti's hardcoded bracket survives the merge even
+        // if the server holds an empty stub under her name (the union above
+        // would otherwise let the stub win). Never overwrites real picks,
+        // never touches any other entry.
+        applyShevantiRestore(mergedPreds);
 
         // SAFETY: while before the deadline, strip any stale lock flag so no one
         // is frozen out. Never touches picks.
@@ -2200,9 +2210,15 @@ function setApiStatus(s,msg){
 }
 function startPolling(){
   fetchLiveResults();
-  setInterval(fetchLiveResults, 60000);
-  // Also re-sync from JSONBin every 30s so admin results appear for all users
-  setInterval(async ()=>{
+  setInterval(fetchLiveResults, 60000); // ESPN only — does not use JSONBin quota
+  // Re-sync from JSONBin every 3 minutes (was 30s — that burned ~2,900
+  // requests/day per open tab and drained the free quota mid-tournament).
+  // Skipped entirely while the tab is hidden; an immediate refresh fires
+  // when the user returns to the tab, so data never feels stale.
+  const pollJSONBin = async ()=>{
+    // Don't poll while the tab is in the background — no one is looking,
+    // and it's the main source of quota burn.
+    if (document.hidden) return;
     // Don't poll-merge while a save is in flight or queued — reading the server
     // mid-write can revert a just-submitted bracket. Also skip if the user is
     // actively editing their bracket (we must never replace their working copy).
@@ -2236,6 +2252,9 @@ function startPolling(){
         }
         if (myGroup) groupPicks[currentUser] = myGroup;
       }
+      // RESTORE: keep Shevanti's hardcoded bracket present locally even if the
+      // remote copy is still a stale/empty stub. Never overwrites real picks.
+      applyShevantiRestore(predictions);
       liveResults        = data.liveResults        || liveResults;
       liveGroupStandings = data.liveGroupStandings || liveGroupStandings;
       liveTeams          = data.liveTeams          || liveTeams;
@@ -2248,7 +2267,10 @@ function startPolling(){
         updateLandingCards();
       }
     } catch(e) { /* silent fail — JSONBin unreachable */ }
-  }, 30000);
+  };
+  setInterval(pollJSONBin, 180000); // 3 minutes
+  // When the user comes back to the tab, refresh right away.
+  document.addEventListener('visibilitychange', ()=>{ if (!document.hidden) pollJSONBin(); });
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -3336,6 +3358,57 @@ function adminClearAllBrackets() {
 /* ══════════════════════════════════════════════════════════════════
    INIT — async because we load from JSONBin first
 ══════════════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════════════
+   RESTORE — Shevanti's bracket (hardcoded)
+   Her submitted picks were lost from the shared bin. This block restores
+   exactly her entry and NEVER touches anyone else's saved data.
+   Safety rules:
+   - If a bracket for Shevanti already exists WITH any picks, nothing
+     happens — a real bracket is never overwritten.
+   - Only a missing entry or an empty stub is replaced.
+   - Applied on load, inside the merge-before-write sync, and in the 30s
+     poll merge, so an empty server stub can't clobber the restore and
+     the restored entry is included in every write to the bin.
+══════════════════════════════════════════════════════════════════ */
+const SHEVANTI_RESTORE_NAME = 'Shevanti';
+const SHEVANTI_RESTORE_PICKS = {
+  // Slot order matches R32_CONFIRMED (0–15):
+  //   0 GER>PAR  1 FRA>SWE  2 CAN>RSA  3 NED>MAR
+  //   4 POR>CRO  5 ESP>AUT  6 USA>BIH  7 BEL>SEN
+  //   8 BRA>JPN  9 NOR>CIV 10 MEX>ECU 11 ENG>COD
+  //  12 ARG>CPV 13 AUS>EGY 14 SUI>ALG 15 COL>GHA
+  r32: ['GER','FRA','CAN','NED','POR','ESP','USA','BEL',
+        'BRA','NOR','MEX','ENG','ARG','AUS','SUI','COL'],
+  // 0 FRA>GER 1 NED>CAN 2 ESP>POR 3 BEL>USA 4 BRA>NOR 5 ENG>MEX 6 ARG>AUS 7 COL>SUI
+  r16: ['FRA','NED','ESP','BEL','BRA','ENG','ARG','COL'],
+  // 0 FRA>NED 1 ESP>BEL 2 ENG>BRA 3 ARG>COL
+  qf:  ['FRA','ESP','ENG','ARG'],
+  // 0 FRA>ESP 1 ARG>ENG
+  sf:  ['FRA','ARG'],
+  tp:    'ESP',  // Spain beats England for 3rd
+  final: 'ARG',  // Argentina beats France
+  submitted: true,
+  deadlineLocked: true,
+};
+function shevantiBracketHasPicks(p){
+  return !!(p && (
+    (Array.isArray(p.r32)&&p.r32.some(Boolean)) ||
+    (Array.isArray(p.r16)&&p.r16.some(Boolean)) ||
+    (Array.isArray(p.qf) &&p.qf.some(Boolean))  ||
+    (Array.isArray(p.sf) &&p.sf.some(Boolean))  ||
+    p.tp || p.final));
+}
+function applyShevantiRestore(preds){
+  if (!preds) return false;
+  // Reuse an existing key regardless of casing so we never create a duplicate.
+  const key = Object.keys(preds).find(
+    n => n.toLowerCase() === SHEVANTI_RESTORE_NAME.toLowerCase()
+  ) || SHEVANTI_RESTORE_NAME;
+  if (shevantiBracketHasPicks(preds[key])) return false; // real bracket — never overwrite
+  preds[key] = JSON.parse(JSON.stringify(SHEVANTI_RESTORE_PICKS));
+  return true;
+}
+
 (async function init() {
   // Show spinner, load all shared data from JSONBin
   await loadState();
@@ -3371,6 +3444,10 @@ function adminClearAllBrackets() {
     if (unlocked) { savePredictions(); }
     localStorage.setItem('wc26_unlock_v1', '1');
   }
+
+  // Restore Shevanti's bracket if it's missing or an empty stub (see block
+  // above init). Runs every load; a bracket with real picks is never touched.
+  if (applyShevantiRestore(predictions)) { savePredictions(); }
 
   startTimer();
   startPolling();
