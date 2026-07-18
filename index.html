@@ -335,6 +335,17 @@ label{display:block;font-size:.75rem;font-weight:600;color:var(--muted);margin-b
 .flex-gap{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .hidden{display:none!important}
 @media(max-width:600px){.panel{padding:10px}.card{padding:12px}.leaderboard th,.leaderboard td{padding:7px;font-size:.74rem}}
+/* ── Scoring breakdown badges & bars ── */
+.score-badge{margin-left:auto;font-size:.62rem;font-weight:700;padding:1px 6px;border-radius:8px;white-space:nowrap;flex:0 0 auto;}
+.sb-full{background:rgba(38,166,91,.18);color:#7de8a0;border:1px solid rgba(38,166,91,.5);}
+.sb-part{background:rgba(240,180,41,.14);color:var(--gold);border:1px solid rgba(240,180,41,.45);}
+.sb-wrong{background:rgba(214,69,69,.12);color:#e88;border:1px solid rgba(214,69,69,.35);opacity:.8;}
+.sb-pend{background:rgba(255,255,255,.05);color:var(--muted);border:1px solid var(--border);}
+.group-team-row .score-badge{margin-left:6px;}
+#bracket-score-bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0 0 10px;padding:8px 10px;background:var(--card);border:1px solid var(--border);border-radius:8px;}
+#bracket-score-bar .sbar-total{margin-left:auto;font-weight:800;color:var(--gold);font-size:.85rem;}
+#gs-score-total{margin:0 0 12px;padding:8px 12px;background:var(--card);border:1px solid var(--border);border-radius:8px;font-weight:700;color:#7de8a0;font-size:.9rem;}
+.g-pts-score{color:var(--gold);font-weight:800;}
 </style>
 </head>
 <body>
@@ -622,6 +633,12 @@ label{display:block;font-size:.75rem;font-weight:600;color:var(--muted);margin-b
       <span class="score-pill tag-tp">3rd: 8pt</span>
       <span class="score-pill tag-final">Final: 40pt</span>
       <span class="score-pill" style="background:rgba(240,180,41,.15);color:var(--gold);border:1px solid var(--gold);">Champion: +20pt</span>
+    </div>
+    <div style="font-size:.68rem;color:var(--muted);margin-top:6px;">
+      Round columns show <strong>points earned</strong> — a ◐ means the total includes partial credit
+      (half points when your team advanced via a different matchup than you predicted).
+      Groups + round columns always sum to Total. Click a player's <em>(group stage)</em> or
+      <em>(knockout)</em> link to see their pick-by-pick breakdown with ✓/◐/✗ next to every pick.
     </div>
     <div style="overflow-x:auto;margin-top:10px;">
       <table class="leaderboard">
@@ -993,6 +1010,162 @@ function calcKnockoutScore(name, mode){
   return fn(name);
 }
 
+
+/* ══════════════════════════════════════════════════════════════════
+   SCORING ANNOTATORS — display-only, never used to compute scores
+   ──────────────────────────────────────────────────────────────────
+   These mirror the production scorers pick-by-pick so the UI can show
+   a checkmark + points next to every pick. They MUST stay in lockstep
+   with legacyKnockoutScore / scoreKnockoutPartial / calcGroupScore:
+   the test suite asserts annotator totals === production totals over
+   randomized brackets. Production scoring itself is untouched.
+   Statuses: 'full' (exact), 'partial' (advanced, different matchup),
+   'wrong', 'pending' (result not in yet), 'empty' (no pick made).
+══════════════════════════════════════════════════════════════════ */
+function annotateKnockout(name, mode){
+  const m = mode || SCORING_CONFIG.mode || 'legacy';
+  const pred = predictions[name] || {};
+  const F = m==='partial' ? SCORING_CONFIG.partial.full    : ROUND_POINTS;
+  const A = m==='partial' ? SCORING_CONFIG.partial.advance : null;
+  const BONUS = m==='partial' ? SCORING_CONFIG.partial.championBonus : CHAMPION_BONUS;
+  const out = { mode:m, rounds:{}, total:0, anyPlayed:false };
+
+  KO_ARRAY_ROUNDS.forEach(({key, slots})=>{
+    const actual = actualRound(key, slots);
+    const played = actual.set.size > 0;
+    if (played) out.anyPlayed = true;
+    const picks = pred[key] || [];
+    const slotsOut = new Array(slots);
+    let pts = 0, hits = 0, partials = 0;
+
+    if (m === 'partial'){
+      if (played){
+        // Pass 1: exact-slot full credit (same order as scoreKnockoutPartial)
+        const fullCredited = new Set();
+        for (let i=0;i<slots;i++){
+          const p = picks[i];
+          if (p && actual.bySlot[i] === p){
+            slotsOut[i] = {pick:p, status:'full', pts:F[key]};
+            pts += F[key]; hits++; fullCredited.add(p);
+          }
+        }
+        // Pass 2: advancement partial credit, max one per actual advancing team
+        const partialCredited = new Set();
+        for (let i=0;i<slots;i++){
+          if (slotsOut[i]) continue;
+          const p = picks[i];
+          if (!p){ slotsOut[i] = {pick:null, status:'empty', pts:0}; continue; }
+          if (!fullCredited.has(p) && !partialCredited.has(p) && actual.set.has(p)){
+            slotsOut[i] = {pick:p, status:'partial', pts:A[key]};
+            pts += A[key]; partials++; partialCredited.add(p);
+          } else {
+            // Zero points. If this slot's own result isn't in yet and the team
+            // hasn't been ruled out, show pending instead of a hard ✗.
+            const slotPlayed = actual.bySlot[i] !== undefined;
+            slotsOut[i] = {pick:p, status:(!slotPlayed && !actual.set.has(p)) ? 'pending' : 'wrong', pts:0};
+          }
+        }
+      } else {
+        for (let i=0;i<slots;i++) slotsOut[i] = {pick:picks[i]||null, status:picks[i]?'pending':'empty', pts:0};
+      }
+    } else { // legacy: slot-exact only
+      for (let i=0;i<slots;i++){
+        const p = picks[i], res = liveResults[`${key}_${i}`];
+        if (!p) slotsOut[i] = {pick:null, status:'empty', pts:0};
+        else if (res === p){ slotsOut[i]={pick:p,status:'full',pts:F[key]}; pts+=F[key]; hits++; }
+        else slotsOut[i] = {pick:p, status:res ? 'wrong' : 'pending', pts:0};
+      }
+    }
+    out.rounds[key] = {slots:slotsOut, pts, hits, partials, played};
+    out.total += pts;
+  });
+
+  // 3rd-place game — exact winner only, in both modes
+  { const p = pred.tp || null, res = liveResults.tp;
+    const st = p ? (res ? (res===p ? 'full' : 'wrong') : 'pending') : 'empty';
+    const pts = st==='full' ? F.tp : 0;
+    if (res) out.anyPlayed = true;
+    out.rounds.tp = {slots:[{pick:p,status:st,pts}], pts, hits:st==='full'?1:0, partials:0, played:!!res};
+    out.total += pts; }
+
+  // Final — exact winner = full + champion bonus; in partial mode, a predicted
+  // champion who reached the final (won their SF) earns the advance points.
+  { const p = pred.final || null, res = liveResults.final;
+    const finalists = new Set([liveResults.sf_0, liveResults.sf_1].filter(Boolean));
+    let st='empty', pts=0, bonus=0;
+    if (p){
+      if (res === p){ st='full'; pts=F.final; bonus=BONUS; }
+      else if (m==='partial' && finalists.has(p)){ st='partial'; pts=A.final; }
+      else if (res || finalists.size===2){ st='wrong'; }
+      else st='pending';
+    }
+    if (res) out.anyPlayed = true;
+    out.rounds.final = {slots:[{pick:p,status:st,pts:pts+bonus,bonus}], pts:pts+bonus,
+                        hits:st==='full'?1:0, partials:st==='partial'?1:0,
+                        played:!!res || finalists.size===2};
+    out.total += pts + bonus; }
+
+  return out;
+}
+
+// Group-stage annotator — mirrors calcGroupScore exactly.
+// Per group: pos-1 pick earns +1 for exact winner AND +1 for top-2 (max 2);
+// pos-2 pick earns +1 for top-2; pos-3 pick earns +1 for exact 3rd; pos-4
+// can never score. Groups only score once all 6 matches are complete.
+function annotateGroups(user){
+  const picks = groupPicks[user] || {};
+  const out = { groups:{}, total:0, anyScored:false };
+  Object.keys(GROUP_TEAMS).forEach(grp => {
+    const actual = (liveGroupStandings[grp] && liveGroupStandings[grp].filter(Boolean).length >= 2)
+      ? liveGroupStandings[grp]
+      : computeGroupStandings(grp);
+    const pick = picks[grp];
+    const matchesPlayed = GROUP_MATCHES[grp].filter(mm => liveResults[`gm_${mm.m}`]).length;
+    const complete = matchesPlayed >= GROUP_MATCHES[grp].length;
+    const g = { complete, scored: !!(actual && pick && complete), pts:0, actual, lines:[] };
+    if (g.scored){
+      const actualTop2 = actual.slice(0,2);
+      let p1 = 0;
+      if (pick[0] === actual[0]) p1 += 1;          // exact group winner
+      if (actualTop2.includes(pick[0])) p1 += 1;   // + in top 2
+      const p2 = actualTop2.includes(pick[1]) ? 1 : 0;
+      const p3 = (pick[2] && pick[2] === actual[2]) ? 1 : 0;
+      g.lines = [
+        {code:pick[0], pts:p1, max:2},
+        {code:pick[1], pts:p2, max:1},
+        {code:pick[2], pts:p3, max:1},
+        {code:pick[3], pts:0,  max:0},
+      ];
+      g.pts = p1 + p2 + p3;
+      out.anyScored = true;
+    }
+    out.groups[grp] = g;
+    out.total += g.pts;
+  });
+  return out;
+}
+
+// Shared badge builder for pick rows.
+function scoreBadgeEl(a, isFinal){
+  const s = document.createElement('span');
+  if (a.status === 'full'){
+    s.className = 'score-badge sb-full';
+    s.textContent = `✓ +${a.pts}`;
+    if (isFinal && a.bonus) s.title = `${a.pts - a.bonus} pts + ${a.bonus} champion bonus`;
+  } else if (a.status === 'partial'){
+    s.className = 'score-badge sb-part';
+    s.textContent = `◐ +${a.pts}`;
+    s.title = 'Partial credit — team advanced this far, but via a different matchup than predicted';
+  } else if (a.status === 'wrong'){
+    s.className = 'score-badge sb-wrong';
+    s.textContent = '✗ 0';
+  } else if (a.status === 'pending'){
+    s.className = 'score-badge sb-pend';
+    s.textContent = '⏳';
+    s.title = 'Result pending';
+  }
+  return s;
+}
 
 /* ══════════════════════════════════════════════════════════════════
    STATE
@@ -1632,15 +1805,48 @@ function renderMyBracket() {
   const isOther = viewingUser && viewingUser !== currentUser;
   const picks = isOther ? predictions[viewingUser] : myPicks;
   const b = buildBracket(picks || {});
-  _renderBracketTree(b, isOther);
+  _renderBracketTree(b, isOther, isOther ? viewingUser : currentUser);
 }
 
-function _renderBracketTree(b, forceReadOnly) {
+function _renderBracketTree(b, forceReadOnly, scoreName) {
   const header  = document.getElementById('my-bracket-header');
   const body    = document.getElementById('my-bracket-body');
   const svg     = document.getElementById('my-bracket-svg');
   const wrap    = document.getElementById('my-bracket-wrap');
   header.innerHTML=''; body.innerHTML=''; svg.innerHTML='';
+
+  // ── Scoring breakdown (display only — production scoring untouched) ──
+  // Annotate this bracket against live results so every pick shows ✓/◐/✗ and
+  // the bar below shows per-round subtotals that match the Dashboard exactly.
+  const scorable = scoreName && predictions[scoreName] &&
+    (predictions[scoreName].submitted || Date.now() >= DEADLINE_UTC);
+  const anno = scorable ? annotateKnockout(scoreName) : null;
+  let sbar = document.getElementById('bracket-score-bar');
+  if (!sbar){
+    sbar = document.createElement('div');
+    sbar.id = 'bracket-score-bar';
+    header.parentNode.insertBefore(sbar, header);
+  }
+  if (anno && anno.anyPlayed){
+    const gsPts  = calcGroupScore(scoreName);
+    const koPts  = calcScore(scoreName);          // dashboard's knockout total
+    const grand  = gsPts + koPts;                  // dashboard's Total column
+    if (anno.total !== koPts) console.warn('Score breakdown mismatch', scoreName, anno.total, koPts);
+    const chip = (cls, label, r) =>
+      `<span class="score-pill ${cls}" title="${r.hits} exact${r.partials?` + ${r.partials} partial`:''}">${label}: ${r.played ? r.pts+'pt' : '—'}</span>`;
+    sbar.innerHTML =
+      `<span class="score-pill" style="background:rgba(26,122,60,.2);color:#7de8a0;border:1px solid var(--mid);">Groups: ${gsPts}pt</span>`
+      + chip('tag-r32','R32',  anno.rounds.r32)
+      + chip('tag-r16','R16',  anno.rounds.r16)
+      + chip('tag-qf', 'QF',   anno.rounds.qf)
+      + chip('tag-sf', 'SF',   anno.rounds.sf)
+      + chip('tag-tp', '3rd',  anno.rounds.tp)
+      + chip('tag-final','Final', anno.rounds.final)
+      + `<span class="sbar-total">Total: ${grand} pts</span>`;
+    sbar.style.display = '';
+  } else {
+    sbar.style.display = 'none';
+  }
 
   // Read-only ONLY when: viewing someone else's bracket, or the real deadline
   // has passed. A submitted bracket stays fully editable until the deadline so
@@ -1726,6 +1932,14 @@ function _renderBracketTree(b, forceReadOnly) {
         const canPick = !locked && t.code; // any round with a real team is clickable
         row.className='match-team'+(isWinner?' winner':'')+(isLoser?' loser':'')+(canPick?' selectable':'');
         row.innerHTML=`<span class="flag">${t.flag}</span><span class="name">${t.name}</span>`;
+        // Score badge on the picked team's row (breakdown display only)
+        if (isWinner && anno){
+          const rd = anno.rounds[round];
+          const a  = rd && rd.slots[idx];
+          if (a && a.pick === t.code && a.status !== 'empty'){
+            row.appendChild(scoreBadgeEl(a, round === 'final'));
+          }
+        }
         if (canPick) row.addEventListener('click',()=>makePick(round,idx,t.code));
       }
       card.appendChild(row);
@@ -2389,7 +2603,14 @@ function renderDashboard(){
     const ksPts = calcScore(n);
     const gsPts = calcGroupScore(n);
     const total  = ksPts + gsPts;
-    return { name:n, pts:total, gsPts, ksPts, bd:calcBreakdown(n), alive:isAlive(n) };
+    // Round columns show POINTS from the same partial-aware scoring that
+    // produces ksPts (not exact-hit counts), so columns always sum to Total.
+    // If the bracket isn't scorable yet (calcScore gated it to 0), zero the
+    // round display too so columns can never disagree with the Total.
+    const anno = ksPts === 0 && !(predictions[n]?.submitted || Date.now() >= DEADLINE_UTC)
+      ? null : annotateKnockout(n);
+    if (anno && anno.total !== ksPts) console.warn('Dashboard breakdown mismatch', n);
+    return { name:n, pts:total, gsPts, ksPts, kr:anno, alive:isAlive(n) };
   }).sort((a,b)=>b.pts-a.pts);
 
   const max = ranked[0]?.pts || 1;
@@ -2447,7 +2668,12 @@ function renderDashboard(){
       <td class="pts-num">${p.pts}</td>
       <td><div class="pts-bar-wrap"><div class="pts-bar-bg"><div class="pts-bar-fill" style="width:${pct}%"></div></div><span style="font-size:.7rem;color:var(--muted)">${p.pts}pt</span></div></td>
       <td title="${gsCellTitle}" style="color:#7de8a0;font-weight:600;">${p.gsPts}<span style="font-size:.65rem;color:var(--muted);font-weight:400;"> (${gsPicksDone}/12)</span></td>
-      <td>${p.bd.r32}</td><td>${p.bd.r16}</td><td>${p.bd.qf}</td><td>${p.bd.sf}</td><td>${p.bd.tp}</td><td>${p.bd.fin}</td>
+      ${['r32','r16','qf','sf','tp','final'].map(rk => {
+        const r = p.kr && p.kr.rounds[rk];
+        if (!r || !r.played) return '<td style="color:var(--muted);">—</td>';
+        const tip = `${r.hits} exact${r.partials ? ` + ${r.partials} partial` : ''}`;
+        return `<td title="${tip}">${r.pts}${r.partials ? '<span style="font-size:.6rem;color:var(--gold);" title="includes partial credit">◐</span>' : ''}</td>`;
+      }).join('')}
       <td style="font-size:.8rem;">${cd}</td>
       <td>${aliveBadge}</td>
       <td>${viewCell}</td>
@@ -3089,26 +3315,43 @@ function renderGroupStage() {
   }
 
   const userPicks = groupPicks[displayUser] || {};
+
+  // Scoring breakdown (display only) — per-group points + page total that
+  // matches calcGroupScore()/the Dashboard "Groups" column exactly.
+  const ganno = annotateGroups(displayUser);
+  if (ganno.anyScored){
+    if (ganno.total !== calcGroupScore(displayUser)) console.warn('Group breakdown mismatch', displayUser);
+    const totalBar = document.createElement('div');
+    totalBar.id = 'gs-score-total';
+    totalBar.innerHTML = `📊 Group Stage Total: ${ganno.total} pts <span style="font-weight:400;color:var(--muted);font-size:.72rem;">— sum of all group subtotals below; matches the Dashboard "Groups" column</span>`;
+    grid.appendChild(totalBar);
+  }
+
   const container = document.createElement('div');
   container.className = 'gs-groups-grid';
 
   Object.keys(GROUP_TEAMS).sort().forEach(grp => {
     const teams = GROUP_TEAMS[grp];
     const ranked = userPicks[grp] ? [...userPicks[grp]] : [...teams]; // default = draw order
-    container.appendChild(buildGroupCard(grp, ranked, locked));
+    container.appendChild(buildGroupCard(grp, ranked, locked, ganno.groups[grp]));
   });
 
   grid.appendChild(container);
 }
 
-function buildGroupCard(grp, ranked, locked) {
+function buildGroupCard(grp, ranked, locked, ganno) {
   const card = document.createElement('div');
   card.className = 'group-card';
   card.dataset.group = grp;
 
   const header = document.createElement('div');
   header.className = 'group-card-header';
-  header.innerHTML = `<span class="g-name">Group ${grp}</span><span class="g-pts">Drag to rank · winner=2pt · 2nd=1pt · 3rd=1pt</span>`;
+  // Once the group is fully played, the header hint becomes the group subtotal.
+  const headerRight = (ganno && ganno.scored)
+    ? `<span class="g-pts g-pts-score">${ganno.pts} / 4 pts</span>`
+    : (locked ? `<span class="g-pts">Results pending</span>`
+              : `<span class="g-pts">Drag to rank · winner=2pt · 2nd=1pt · 3rd=1pt</span>`);
+  header.innerHTML = `<span class="g-name">Group ${grp}</span>${headerRight}`;
   card.appendChild(header);
 
   const list = document.createElement('div');
@@ -3126,11 +3369,25 @@ function buildGroupCard(grp, ranked, locked) {
       ? `<span class="gt-badge gt-adv">${i===0?'1st':'2nd'} · Advance</span>`
       : `<span class="gt-badge gt-out">${i===2?'3rd':'4th'}</span>`;
 
+    // Score badge (breakdown display only): pos 1 can earn up to 2pt
+    // (1 exact winner + 1 top-2), pos 2 up to 1pt (top-2), pos 3 up to 1pt
+    // (exact 3rd), pos 4 can never score so it gets no badge.
+    let scoreBadge = '';
+    if (ganno && ganno.scored && ganno.lines[i] && ganno.lines[i].max > 0){
+      const ln = ganno.lines[i];
+      const finished = ganno.actual ? ganno.actual.indexOf(code) : -1;
+      const finTxt = finished >= 0 ? `Finished ${finished+1}${['st','nd','rd','th'][finished]}` : 'Did not finish top 4';
+      scoreBadge = ln.pts > 0
+        ? `<span class="score-badge sb-full" title="${finTxt}">✓ +${ln.pts}</span>`
+        : `<span class="score-badge sb-wrong" title="${finTxt}">✗ 0</span>`;
+    }
+
     row.innerHTML = `
       <span class="gt-pos ${posClass}">${i+1}</span>
       <span class="gt-flag">${tm.flag}</span>
       <span class="gt-name">${tm.name}</span>
       ${badge}
+      ${scoreBadge}
       ${!locked ? '<span class="gt-drag">⠿</span>' : ''}`;
 
     if (!locked) {
